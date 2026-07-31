@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="no">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UNIQE — Prototype</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+
+    <div id="authView" class="auth-view" hidden>
+      <div class="auth-card" id="authCard">
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <p class="auth-sub">Logg inn eller opprett en bruker for å fortsette.</p>
+
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" data-mode="login">Logg inn</button>
+          <button type="button" class="auth-tab" data-mode="signup">Opprett bruker</button>
+        </div>
+
+        <form id="authForm" class="auth-form">
+          <input type="email" id="authIdentifier" placeholder="E-postadresse"
+                 autocomplete="email" required>
+          <input type="password" id="authPassword" placeholder="Passord"
+                 autocomplete="current-password" required minlength="6">
+          <button type="submit" id="authSubmit">Logg inn</button>
+        </form>
+
+        <div class="verify-links" id="forgotPasswordRow">
+          <button type="button" id="forgotPasswordBtn" class="text-btn">Glemt passord?</button>
+        </div>
+
+        <div id="authError" class="auth-error" hidden></div>
+      </div>
+
+      <div class="auth-card" id="verifyCard" hidden>
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <p class="auth-sub">
+          Vi har sendt en bekreftelseskode til <strong id="verifyEmailLabel"></strong>.
+          Skriv den inn under for å fullføre registreringen.
+        </p>
+
+        <form id="verifyForm" class="auth-form">
+          <input type="text" id="verifyCode" placeholder="6-sifret kode" inputmode="numeric"
+                 autocomplete="one-time-code" maxlength="6" required>
+          <button type="submit" id="verifySubmit">Bekreft</button>
+        </form>
+
+        <div class="verify-links">
+          <button type="button" id="resendCodeBtn" class="text-btn">Send kode på nytt</button>
+          <button type="button" id="cancelVerifyBtn" class="text-btn">Avbryt</button>
+        </div>
+
+        <div id="verifyError" class="auth-error" hidden></div>
+      </div>
+
+      <div class="auth-card" id="forgotCard" hidden>
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <p class="auth-sub">
+          Skriv inn e-postadressen din, så sender vi deg en lenke for å tilbakestille passordet.
+        </p>
+
+        <form id="forgotForm" class="auth-form">
+          <input type="email" id="forgotIdentifier" placeholder="E-postadresse"
+                 autocomplete="email" required>
+          <button type="submit" id="forgotSubmit">Send lenke</button>
+        </form>
+
+        <div class="verify-links">
+          <button type="button" id="backToLoginBtn" class="text-btn">Tilbake til innlogging</button>
+        </div>
+
+        <div id="forgotMessage" class="auth-error" hidden></div>
+      </div>
+
+      <div class="auth-card" id="resetCard" hidden>
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <p class="auth-sub">Velg et nytt passord.</p>
+
+        <form id="resetForm" class="auth-form">
+          <input type="password" id="resetNewPassword" placeholder="Nytt passord"
+                 autocomplete="new-password" required minlength="6">
+          <input type="password" id="resetConfirmPassword" placeholder="Bekreft nytt passord"
+                 autocomplete="new-password" required minlength="6">
+          <button type="submit" id="resetSubmit">Sett nytt passord</button>
+        </form>
+
+        <div id="resetMessage" class="auth-error" hidden></div>
+      </div>
+    </div>
+
+    <div id="chatView" class="chat-view" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span> UNIQE <span class="tag">· prototype</span></div>
+        <div class="actions">
+          <span id="userIndicator" class="user-indicator"></span>
+          <button id="checkinBtn" class="ghost-btn">☀️ Simuler innsjekk</button>
+          <button id="settingsBtn" class="text-btn" title="Innstillinger">Innstillinger</button>
+          <button id="resetBtn" class="text-btn" title="Slett samtalen og start på nytt">Nullstill</button>
+          <button id="logoutBtn" class="text-btn">Logg ut</button>
+        </div>
+      </header>
+
+      <main id="chat" class="chat">
+        <div class="empty-state" id="emptyState">
+          Dette er begynnelsen på samtalen. Skriv noe under, eller trykk «Simuler innsjekk» for å se hvordan det føles når UNIQE tar kontakt selv.
+        </div>
+      </main>
+
+      <form id="composer" class="composer">
+        <textarea id="input" placeholder="Skriv noe…" rows="1"></textarea>
+        <button type="submit" id="sendBtn">Send</button>
+      </form>
+
+      <footer class="disclaimer">
+        Dette er en tidlig prototype — ikke en erstatning for profesjonell hjelp.
+        Ved akutt fare, ring <strong>113</strong>. Mental Helse Hjelpetelefon: <strong>116 123</strong>.
+      </footer>
+
+      <div id="settingsModal" class="modal-overlay" hidden>
+        <div class="modal-card">
+          <div class="modal-header">
+            <span>Innstillinger</span>
+            <button id="closeSettingsBtn" class="modal-close" aria-label="Lukk">&times;</button>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-label">Din bruker</div>
+            <div class="modal-value" id="settingsIdentifier"></div>
+            <div class="modal-hint" id="settingsCreatedAt"></div>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-label">Endre passord</div>
+            <form id="passwordForm" class="auth-form">
+              <input type="password" id="currentPassword" placeholder="Nåværende passord"
+                     autocomplete="current-password" required>
+              <input type="password" id="newPassword" placeholder="Nytt passord"
+                     autocomplete="new-password" required minlength="6">
+              <input type="password" id="confirmPassword" placeholder="Bekreft nytt passord"
+                     autocomplete="new-password" required minlength="6">
+              <button type="submit" id="passwordSubmit">Oppdater passord</button>
+            </form>
+            <div id="passwordMessage" class="auth-error" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
