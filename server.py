@@ -509,6 +509,21 @@ class Handler(BaseHTTPRequestHandler):
             self._suppress_body = False
 
     def do_GET(self):
+        # The session cookie has no Domain attribute, so it's host-only
+        # (RFC 6265) — a session created on the apex domain is never sent to
+        # "www." and vice versa. Rather than fragment sessions across two
+        # hosts, redirect www to the apex so there's only ever one canonical
+        # host. This also covers HEAD, since do_HEAD delegates here.
+        host = self.headers.get("Host", "")
+        hostname = host.split(":")[0].lower()
+        if hostname.startswith("www."):
+            apex_host = host[len("www."):]
+            self.send_response(301)
+            self.send_header("Location", f"https://{apex_host}{self.path}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         path = urlparse(self.path).path
         if path == "/" or path == "/index.html":
             self._send_file("index.html", "text/html; charset=utf-8")
