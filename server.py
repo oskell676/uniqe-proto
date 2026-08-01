@@ -45,7 +45,7 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"
 HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse proxy / in production
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
-MODEL = "claude-opus-5"
+MODEL = "claude-sonnet-5"
 MAX_HISTORY_TURNS_SENT = 30  # how many past messages to feed back to the model
 SESSION_COOKIE_NAME = "uniqe_session"
 PBKDF2_ITERATIONS = 100_000
