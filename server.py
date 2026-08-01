@@ -1,10 +1,14 @@
-"""UNIQE prototype server — stdlib only (no Node.js / pip deps required).
+"""UNIQE prototype server — Python 3, mostly stdlib.
 
 Serves the chat UI from ./public and proxies conversation turns to the
 Claude API. Each user has their own account (email + password, confirmed via
 an emailed code before the account is created) and their own conversation
 history under ./data/conversations/<user_id>.json, so "memory" survives a
 page reload and is private per person.
+
+The one non-stdlib dependency is pywebpush (Web Push notifications), which
+needs real elliptic-curve crypto that Python's stdlib doesn't provide —
+hand-rolling that would be irresponsible. See requirements.txt.
 """
 
 import hashlib
@@ -24,6 +28,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, urlencode
 
+try:
+    from pywebpush import webpush, WebPushException
+except ImportError:
+    webpush = None
+    WebPushException = Exception
+
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
@@ -39,6 +49,10 @@ PBKDF2_ITERATIONS = 100_000
 EMAIL_CODE_TTL = 15 * 60  # seconds a verification code stays valid
 RESEND_COOLDOWN = 30  # seconds between resend requests for the same signup
 PASSWORD_RESET_TTL = 30 * 60  # seconds a password-reset link stays valid
+
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:main@uniqe-no.com")
 
 SYSTEM_PROMPT = """\
 Du er UNIQE — en varm, ikke-dømmende samtalepartner som alltid er tilgjengelig. Dette er en tidlig prototype som tester konseptet.
@@ -227,6 +241,56 @@ def safe_send_email(send_fn, *args):
         return "Klarte ikke å sende e-post akkurat nå. Prøv igjen om litt."
 
 
+def send_push_notification(user_id, title, body):
+    """Send a Web Push notification to every device the user has subscribed
+    from. Best-effort: never raises — a dead subscription or missing VAPID
+    config must not break the caller's main flow (e.g. a check-in reply)."""
+    if webpush is None or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+
+    with _users_lock:
+        users = load_users()
+        user = find_user_by_id(users, user_id)
+        subscriptions = list(user.get("push_subscriptions", [])) if user else []
+
+    if not subscriptions:
+        return
+
+    # The actual network calls happen outside _users_lock, same reasoning as
+    # the SMTP send in signup — a slow/hanging push shouldn't serialize every
+    # other request that touches user accounts.
+    dead_endpoints = []
+    payload = json.dumps({"title": title, "body": body})
+    for sub in subscriptions:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_SUBJECT},
+                timeout=10,
+            )
+        except WebPushException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (404, 410):
+                dead_endpoints.append(sub.get("endpoint"))
+            else:
+                print(f"⚠️  Push-varsel feilet: {exc}", flush=True)
+        except Exception as exc:
+            print(f"⚠️  Push-varsel feilet: {exc}", flush=True)
+
+    if dead_endpoints:
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if user:
+                user["push_subscriptions"] = [
+                    s for s in user.get("push_subscriptions", [])
+                    if s.get("endpoint") not in dead_endpoints
+                ]
+                save_users(users)
+
+
 def get_pending_signup(identifier):
     """Returns the pending signup dict for identifier, or None if missing/expired."""
     with _pending_lock:
@@ -397,8 +461,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("app.js", "application/javascript; charset=utf-8")
         elif path == "/style.css":
             self._send_file("style.css", "text/css; charset=utf-8")
+        elif path == "/manifest.json":
+            self._send_file("manifest.json", "application/manifest+json; charset=utf-8")
+        elif path == "/sw.js":
+            self._send_file("sw.js", "application/javascript; charset=utf-8")
+        elif path.startswith("/icons/") and path.endswith(".png"):
+            self._send_file(path.lstrip("/"), "image/png")
         elif path == "/api/auth/me":
             self._handle_me()
+        elif path == "/api/push/vapid-public-key":
+            user_id = self._require_auth()
+            if not user_id:
+                return
+            if not VAPID_PUBLIC_KEY:
+                self._send_json({"error": "Push-varsler er ikke konfigurert på serveren."}, 503)
+                return
+            self._send_json({"publicKey": VAPID_PUBLIC_KEY})
         elif path == "/api/history":
             user_id = self._require_auth()
             if not user_id:
@@ -427,6 +505,10 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_logout()
         elif path == "/api/auth/change-password":
             self._handle_change_password()
+        elif path == "/api/push/subscribe":
+            self._handle_push_subscribe()
+        elif path == "/api/push/unsubscribe":
+            self._handle_push_unsubscribe()
         elif path == "/api/chat":
             self._handle_chat()
         elif path == "/api/checkin":
@@ -640,6 +722,48 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json({"ok": True})
 
+    def _handle_push_subscribe(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        subscription = self._read_json_body()
+        endpoint = subscription.get("endpoint")
+        if not endpoint or "keys" not in subscription:
+            self._send_json({"error": "Ugyldig push-abonnement."}, 400)
+            return
+
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if not user:
+                self._send_json({"error": "Fant ikke brukeren."}, 404)
+                return
+            subs = user.setdefault("push_subscriptions", [])
+            subs[:] = [s for s in subs if s.get("endpoint") != endpoint]
+            subs.append(subscription)
+            save_users(users)
+
+        self._send_json({"ok": True})
+
+    def _handle_push_unsubscribe(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        body = self._read_json_body()
+        endpoint = body.get("endpoint")
+
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if user:
+                subs = user.setdefault("push_subscriptions", [])
+                subs[:] = [s for s in subs if s.get("endpoint") != endpoint]
+                save_users(users)
+
+        self._send_json({"ok": True})
+
     def _handle_forgot_password(self):
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
@@ -775,11 +899,16 @@ class Handler(BaseHTTPRequestHandler):
             })
             save_conversation(user_id, stored)
 
+        preview = reply if len(reply) <= 150 else reply[:147] + "..."
+        send_push_notification(user_id, "UNIQE", preview)
+
         self._send_json({"reply": reply, "proactive": True})
 
 
 def load_dotenv():
-    """Tiny .env loader — avoids a pip dependency for a stdlib-only prototype."""
+    """Tiny .env loader — no pip dependency needed for the base app.
+    Multi-line secrets (e.g. VAPID_PRIVATE_KEY's PEM) are stored on one line
+    with literal \\n escapes and unescaped back into real newlines here."""
     env_path = ROOT / ".env"
     if not env_path.exists():
         return
@@ -789,7 +918,7 @@ def load_dotenv():
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip().strip('"').strip("'").replace("\\n", "\n")
         if key and key not in os.environ:
             os.environ[key] = value
 

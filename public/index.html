@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>UNIQE — Prototype</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#10161A">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="UNIQE">
 </head>
 <body>
   <div class="app">
@@ -143,6 +150,66 @@
               <button type="submit" id="passwordSubmit">Oppdater passord</button>
             </form>
             <div id="passwordMessage" class="auth-error" hidden></div>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-label">Varslinger</div>
+            <p class="modal-hint" style="margin-bottom:10px;">
+              Få et varsel selv om UNIQE er lukket — legg appen til på hjemskjermen først for best resultat på mobil.
+            </p>
+            <button type="button" id="enableNotificationsBtn" class="ghost-btn" style="width:100%;">
+              🔔 Slå på varslinger
+            </button>
+            <div id="notificationsMessage" class="auth-error" hidden></div>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-label">Legg til på hjemskjerm</div>
+            <button type="button" id="installBtn" class="ghost-btn" style="width:100%;">
+              📲 Vis hvordan
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="installModal" class="modal-overlay" hidden>
+        <div class="modal-card">
+          <div class="modal-header">
+            <span>Legg til på hjemskjerm</span>
+            <button id="closeInstallBtn" class="modal-close" aria-label="Lukk">&times;</button>
+          </div>
+
+          <div class="modal-section" id="installNativeSection" hidden>
+            <p class="modal-hint" style="margin-bottom:12px;">
+              Nettleseren din støtter direkte installasjon.
+            </p>
+            <button type="button" id="installNativeBtn" class="ghost-btn" style="width:100%;">Installer UNIQE</button>
+          </div>
+
+          <div class="modal-section" id="installIosSection" hidden>
+            <div class="modal-label">iPhone / iPad (Safari)</div>
+            <ol class="install-steps">
+              <li>Trykk Del-ikonet <span class="kbd">⬆️</span> nederst i Safari</li>
+              <li>Velg <strong>«Legg til på Hjem-skjerm»</strong></li>
+              <li>Trykk <strong>«Legg til»</strong> øverst til høyre</li>
+            </ol>
+          </div>
+
+          <div class="modal-section" id="installAndroidSection" hidden>
+            <div class="modal-label">Android (Chrome)</div>
+            <ol class="install-steps">
+              <li>Trykk menyknappen <strong>⋮</strong> øverst til høyre</li>
+              <li>Velg <strong>«Legg til på startskjermen»</strong> eller <strong>«Installer app»</strong></li>
+              <li>Bekreft</li>
+            </ol>
+          </div>
+
+          <div class="modal-section" id="installDesktopSection" hidden>
+            <div class="modal-label">Datamaskin (Chrome / Edge)</div>
+            <ol class="install-steps">
+              <li>Se etter installer-ikonet i adressefeltet (eller menyen ⋮)</li>
+              <li>Velg <strong>«Installer UNIQE»</strong></li>
+            </ol>
           </div>
         </div>
       </div>

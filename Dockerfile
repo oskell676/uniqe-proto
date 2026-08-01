@@ -1,7 +1,12 @@
-# UNIQE prototype — stdlib-only Python, so no pip install step is needed.
+# UNIQE prototype — Python 3, mostly stdlib. The one dependency is pywebpush
+# (for Web Push notifications), which needs proper elliptic-curve crypto that
+# stdlib doesn't provide.
 FROM python:3.12-slim
 
 WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
 COPY public/ ./public/

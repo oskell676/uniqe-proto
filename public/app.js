@@ -55,9 +55,21 @@ const confirmPasswordInput = document.getElementById("confirmPassword");
 const passwordSubmit = document.getElementById("passwordSubmit");
 const passwordMessage = document.getElementById("passwordMessage");
 
+const enableNotificationsBtn = document.getElementById("enableNotificationsBtn");
+const notificationsMessage = document.getElementById("notificationsMessage");
+const installBtn = document.getElementById("installBtn");
+const installModal = document.getElementById("installModal");
+const closeInstallBtn = document.getElementById("closeInstallBtn");
+const installNativeSection = document.getElementById("installNativeSection");
+const installNativeBtn = document.getElementById("installNativeBtn");
+const installIosSection = document.getElementById("installIosSection");
+const installAndroidSection = document.getElementById("installAndroidSection");
+const installDesktopSection = document.getElementById("installDesktopSection");
+
 let authMode = "login"; // or "signup"
 let currentUser = null;
 let pendingIdentifier = null;
+let deferredInstallPrompt = null;
 let resetToken = null;
 
 // ---------- view switching ----------
@@ -348,6 +360,8 @@ function openSettings() {
   passwordForm.reset();
   passwordMessage.hidden = true;
   passwordMessage.classList.remove("auth-success");
+  notificationsMessage.hidden = true;
+  notificationsMessage.classList.remove("auth-success");
   settingsModal.hidden = false;
 }
 
@@ -408,6 +422,130 @@ passwordForm.addEventListener("submit", async (e) => {
   } finally {
     passwordSubmit.disabled = false;
   }
+});
+
+// ---------- service worker + push notifications ----------
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+}
+
+let swRegistration = null;
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    swRegistration = await navigator.serviceWorker.register("/sw.js");
+    return swRegistration;
+  } catch (err) {
+    console.warn("Kunne ikke registrere service worker:", err);
+    return null;
+  }
+}
+
+async function enableNotifications() {
+  notificationsMessage.hidden = true;
+  notificationsMessage.classList.remove("auth-success");
+
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    notificationsMessage.textContent = "Nettleseren din støtter ikke push-varsler.";
+    notificationsMessage.hidden = false;
+    return;
+  }
+
+  enableNotificationsBtn.disabled = true;
+  try {
+    const reg = swRegistration || (await registerServiceWorker());
+    if (!reg) throw new Error("no service worker");
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      notificationsMessage.textContent = "Du må tillate varsler i nettleseren for at dette skal fungere.";
+      notificationsMessage.hidden = false;
+      return;
+    }
+
+    const keyRes = await fetch("/api/push/vapid-public-key", { credentials: "same-origin" });
+    if (!keyRes.ok) throw new Error("no vapid key");
+    const { publicKey } = await keyRes.json();
+
+    const subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+
+    const subRes = await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(subscription.toJSON()),
+    });
+    if (!subRes.ok) throw new Error("subscribe failed");
+
+    notificationsMessage.textContent = "Varsler er slått på for denne enheten.";
+    notificationsMessage.classList.add("auth-success");
+    notificationsMessage.hidden = false;
+  } catch (err) {
+    notificationsMessage.textContent = "Fikk ikke slått på varsler. Prøv igjen.";
+    notificationsMessage.hidden = false;
+  } finally {
+    enableNotificationsBtn.disabled = false;
+  }
+}
+
+enableNotificationsBtn.addEventListener("click", enableNotifications);
+
+// ---------- add to home screen ----------
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+});
+
+function detectPlatform() {
+  const ua = navigator.userAgent || "";
+  const isIos = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/.test(ua);
+  return { isIos, isAndroid };
+}
+
+function openInstallModal() {
+  installNativeSection.hidden = true;
+  installIosSection.hidden = true;
+  installAndroidSection.hidden = true;
+  installDesktopSection.hidden = true;
+
+  if (deferredInstallPrompt) {
+    installNativeSection.hidden = false;
+  } else {
+    const { isIos, isAndroid } = detectPlatform();
+    if (isIos) installIosSection.hidden = false;
+    else if (isAndroid) installAndroidSection.hidden = false;
+    else installDesktopSection.hidden = false;
+  }
+
+  installModal.hidden = false;
+}
+
+function closeInstallModal() {
+  installModal.hidden = true;
+}
+
+installBtn.addEventListener("click", openInstallModal);
+closeInstallBtn.addEventListener("click", closeInstallModal);
+installModal.addEventListener("click", (e) => {
+  if (e.target === installModal) closeInstallModal();
+});
+
+installNativeBtn.addEventListener("click", async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  closeInstallModal();
 });
 
 // ---------- chat rendering ----------
@@ -579,6 +717,8 @@ resetBtn.addEventListener("click", async () => {
 // ---------- bootstrap ----------
 
 (async function init() {
+  registerServiceWorker();
+
   if (extractResetToken()) {
     showResetView();
     return;
