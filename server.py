@@ -215,6 +215,18 @@ def send_password_reset_email(to_email, reset_link):
     )
 
 
+def safe_send_email(send_fn, *args):
+    """Call a send_*_email function, returning None on success or an error
+    string on failure. A bad SMTP config or a transient provider error should
+    surface as a normal HTTP error response, not crash the request thread."""
+    try:
+        send_fn(*args)
+        return None
+    except Exception as exc:
+        print(f"⚠️  E-postsending feilet: {exc}", flush=True)
+        return "Klarte ikke å sende e-post akkurat nå. Prøv igjen om litt."
+
+
 def get_pending_signup(identifier):
     """Returns the pending signup dict for identifier, or None if missing/expired."""
     with _pending_lock:
@@ -462,7 +474,12 @@ class Handler(BaseHTTPRequestHandler):
                     "expires_at": now + EMAIL_CODE_TTL,
                     "last_sent_at": now,
                 }
-            send_verification_email(identifier, code)
+            error = safe_send_email(send_verification_email, identifier, code)
+            if error:
+                with _pending_lock:
+                    PENDING_SIGNUPS.pop(identifier, None)
+                self._send_json({"error": error}, 502)
+                return
             self._send_json({"ok": True, "verification_required": True, "identifier": identifier})
 
     def _handle_verify_email(self):
@@ -542,7 +559,10 @@ class Handler(BaseHTTPRequestHandler):
             pending["code"] = code
             pending["expires_at"] = now + EMAIL_CODE_TTL
             pending["last_sent_at"] = now
-        send_verification_email(identifier, code)
+        error = safe_send_email(send_verification_email, identifier, code)
+        if error:
+            self._send_json({"error": error}, 502)
+            return
         self._send_json({"ok": True})
 
     def _handle_login(self):
@@ -639,7 +659,10 @@ class Handler(BaseHTTPRequestHandler):
                 host = self.headers.get("Host", f"127.0.0.1:{PORT}")
                 scheme = self.headers.get("X-Forwarded-Proto", "http")
                 reset_link = f"{scheme}://{host}/?{urlencode({'reset_token': token})}"
-                send_password_reset_email(identifier, reset_link)
+                # Errors are logged server-side only — the response must stay
+                # identical either way, or a failure here would leak whether
+                # the account exists.
+                safe_send_email(send_password_reset_email, identifier, reset_link)
 
         # Always the same response, whether or not the account exists —
         # otherwise this endpoint could be used to check which emails are registered.
