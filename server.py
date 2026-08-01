@@ -41,6 +41,7 @@ PUBLIC_DIR = ROOT / "public"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
 USERS_FILE = DATA_DIR / "users.json"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
 HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse proxy / in production
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
@@ -51,6 +52,7 @@ PBKDF2_ITERATIONS = 100_000
 EMAIL_CODE_TTL = 15 * 60  # seconds a verification code stays valid
 RESEND_COOLDOWN = 30  # seconds between resend requests for the same signup
 PASSWORD_RESET_TTL = 30 * 60  # seconds a password-reset link stays valid
+SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days — also used as the cookie's max-age
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
@@ -103,7 +105,6 @@ _users_lock = threading.Lock()
 _sessions_lock = threading.Lock()
 _pending_lock = threading.Lock()
 _reset_lock = threading.Lock()
-SESSIONS = {}  # session token -> user_id (in-memory; resets on server restart)
 PENDING_SIGNUPS = {}  # identifier -> {salt, password_hash, code, expires_at, last_sent_at}
 RESET_TOKENS = {}  # token -> {user_id, expires_at}
 
@@ -148,6 +149,31 @@ def save_users(users):
     USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_sessions():
+    """Load session tokens from disk (on the persistent volume), pruning any
+    that have expired. Sessions must survive process restarts — the Fly
+    machine can restart at any time (deploys, trial-tier auto-stop), and a
+    purely in-memory session store would silently log everyone out each time,
+    even on the same device with a still-valid 30-day cookie."""
+    if not SESSIONS_FILE.exists():
+        return {}
+    try:
+        sessions = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    now = time.time()
+    return {
+        token: entry
+        for token, entry in sessions.items()
+        if entry.get("expires_at", 0) > now
+    }
+
+
+def save_sessions(sessions):
+    SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def find_user(users, identifier):
     return next((u for u in users if u["identifier"] == identifier), None)
 
@@ -164,7 +190,7 @@ def public_user(user):
     }
 
 
-def make_session_cookie(token, max_age=60 * 60 * 24 * 30):
+def make_session_cookie(token, max_age=SESSION_MAX_AGE):
     cookie = SimpleCookie()
     cookie[SESSION_COOKIE_NAME] = token
     morsel = cookie[SESSION_COOKIE_NAME]
@@ -456,7 +482,8 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return None
         with _sessions_lock:
-            return SESSIONS.get(token)
+            session = load_sessions().get(token)
+        return session.get("user_id") if session else None
 
     def _require_auth(self):
         """Returns the authenticated user_id, or sends a 401 and returns None."""
@@ -626,7 +653,9 @@ class Handler(BaseHTTPRequestHandler):
 
         token = secrets.token_urlsafe(32)
         with _sessions_lock:
-            SESSIONS[token] = user["id"]
+            sessions = load_sessions()
+            sessions[token] = {"user_id": user["id"], "expires_at": time.time() + SESSION_MAX_AGE}
+            save_sessions(sessions)
 
         self._send_json(
             {"ok": True, "user": public_user(user)},
@@ -694,7 +723,9 @@ class Handler(BaseHTTPRequestHandler):
 
         token = secrets.token_urlsafe(32)
         with _sessions_lock:
-            SESSIONS[token] = user["id"]
+            sessions = load_sessions()
+            sessions[token] = {"user_id": user["id"], "expires_at": time.time() + SESSION_MAX_AGE}
+            save_sessions(sessions)
 
         self._send_json(
             {"ok": True, "user": public_user(user)},
@@ -705,7 +736,9 @@ class Handler(BaseHTTPRequestHandler):
         token = self._get_cookie_value(SESSION_COOKIE_NAME)
         if token:
             with _sessions_lock:
-                SESSIONS.pop(token, None)
+                sessions = load_sessions()
+                if sessions.pop(token, None) is not None:
+                    save_sessions(sessions)
         self._send_json({"ok": True}, cookie_header=clear_session_cookie())
 
     def _handle_change_password(self):
