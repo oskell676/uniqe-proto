@@ -569,10 +569,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         password = body.get("password") or ""
-        generic_error = "Feil e-post eller passord."
 
         if not identifier:
-            self._send_json({"error": generic_error}, 401)
+            self._send_json({"error": "Skriv inn en gyldig e-postadresse."}, 400)
             return
 
         with _users_lock:
@@ -586,11 +585,11 @@ class Handler(BaseHTTPRequestHandler):
                     403,
                 )
                 return
-            self._send_json({"error": generic_error}, 401)
+            self._send_json({"error": "Denne e-postadressen finnes ikke som bruker."}, 404)
             return
 
         if not verify_password(password, user["salt"], user["password_hash"]):
-            self._send_json({"error": generic_error}, 401)
+            self._send_json({"error": "Feil passord."}, 401)
             return
 
         token = secrets.token_urlsafe(32)
