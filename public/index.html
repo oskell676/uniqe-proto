@@ -124,93 +124,98 @@
         Dette er en tidlig prototype — ikke en erstatning for profesjonell hjelp.
         Ved akutt fare, ring <strong>113</strong>. Mental Helse Hjelpetelefon: <strong>116 123</strong>.
       </footer>
+    </div>
 
-      <div id="settingsModal" class="modal-overlay" hidden>
-        <div class="modal-card">
-          <div class="modal-header">
-            <span>Innstillinger</span>
-            <button id="closeSettingsBtn" class="modal-close" aria-label="Lukk">&times;</button>
+    <div id="settingsView" class="chat-view" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span> UNIQE <span class="tag">· innstillinger</span></div>
+        <div class="actions">
+          <button id="closeSettingsBtn" class="text-btn">← Tilbake</button>
+        </div>
+      </header>
+
+      <main class="settings-content">
+        <div class="modal-section">
+          <div class="modal-label">Konto</div>
+          <div class="modal-value" id="settingsIdentifier"></div>
+          <div class="modal-hint" id="settingsCreatedAt"></div>
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-label">Endre passord</div>
+          <form id="passwordForm" class="auth-form">
+            <input type="password" id="currentPassword" placeholder="Nåværende passord"
+                   autocomplete="current-password" required>
+            <input type="password" id="newPassword" placeholder="Nytt passord"
+                   autocomplete="new-password" required minlength="6">
+            <input type="password" id="confirmPassword" placeholder="Bekreft nytt passord"
+                   autocomplete="new-password" required minlength="6">
+            <button type="submit" id="passwordSubmit">Oppdater passord</button>
+          </form>
+          <div id="passwordMessage" class="auth-error" hidden></div>
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-label">Tillatelser</div>
+
+          <div class="permission-row">
+            <div>
+              <div class="modal-value">Varslinger</div>
+              <div class="modal-hint" id="notificationsStatus">Få et varsel selv om UNIQE er lukket.</div>
+            </div>
+            <button type="button" id="enableNotificationsBtn" class="ghost-btn">🔔 Slå på</button>
           </div>
+          <div id="notificationsMessage" class="auth-error" hidden></div>
 
-          <div class="modal-section">
-            <div class="modal-label">Din bruker</div>
-            <div class="modal-value" id="settingsIdentifier"></div>
-            <div class="modal-hint" id="settingsCreatedAt"></div>
-          </div>
-
-          <div class="modal-section">
-            <div class="modal-label">Endre passord</div>
-            <form id="passwordForm" class="auth-form">
-              <input type="password" id="currentPassword" placeholder="Nåværende passord"
-                     autocomplete="current-password" required>
-              <input type="password" id="newPassword" placeholder="Nytt passord"
-                     autocomplete="new-password" required minlength="6">
-              <input type="password" id="confirmPassword" placeholder="Bekreft nytt passord"
-                     autocomplete="new-password" required minlength="6">
-              <button type="submit" id="passwordSubmit">Oppdater passord</button>
-            </form>
-            <div id="passwordMessage" class="auth-error" hidden></div>
-          </div>
-
-          <div class="modal-section">
-            <div class="modal-label">Varslinger</div>
-            <p class="modal-hint" style="margin-bottom:10px;">
-              Få et varsel selv om UNIQE er lukket — legg appen til på hjemskjermen først for best resultat på mobil.
-            </p>
-            <button type="button" id="enableNotificationsBtn" class="ghost-btn" style="width:100%;">
-              🔔 Slå på varslinger
-            </button>
-            <div id="notificationsMessage" class="auth-error" hidden></div>
-          </div>
-
-          <div class="modal-section">
-            <div class="modal-label">Legg til på hjemskjerm</div>
-            <button type="button" id="installBtn" class="ghost-btn" style="width:100%;">
-              📲 Vis hvordan
-            </button>
+          <div class="permission-row">
+            <div>
+              <div class="modal-value">Hjemskjerm</div>
+              <div class="modal-hint">Legg UNIQE til på hjemskjermen din.</div>
+            </div>
+            <button type="button" id="installBtn" class="ghost-btn">📲 Vis hvordan</button>
           </div>
         </div>
-      </div>
+      </main>
+    </div>
 
-      <div id="installModal" class="modal-overlay" hidden>
-        <div class="modal-card">
-          <div class="modal-header">
-            <span>Legg til på hjemskjerm</span>
-            <button id="closeInstallBtn" class="modal-close" aria-label="Lukk">&times;</button>
-          </div>
+    <div id="installModal" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <span>Legg til på hjemskjerm</span>
+          <button id="closeInstallBtn" class="modal-close" aria-label="Lukk">&times;</button>
+        </div>
 
-          <div class="modal-section" id="installNativeSection" hidden>
-            <p class="modal-hint" style="margin-bottom:12px;">
-              Nettleseren din støtter direkte installasjon.
-            </p>
-            <button type="button" id="installNativeBtn" class="ghost-btn" style="width:100%;">Installer UNIQE</button>
-          </div>
+        <div class="modal-section" id="installNativeSection" hidden>
+          <p class="modal-hint" style="margin-bottom:12px;">
+            Nettleseren din støtter direkte installasjon.
+          </p>
+          <button type="button" id="installNativeBtn" class="ghost-btn" style="width:100%;">Installer UNIQE</button>
+        </div>
 
-          <div class="modal-section" id="installIosSection" hidden>
-            <div class="modal-label">iPhone / iPad (Safari)</div>
-            <ol class="install-steps">
-              <li>Trykk Del-ikonet <span class="kbd">⬆️</span> nederst i Safari</li>
-              <li>Velg <strong>«Legg til på Hjem-skjerm»</strong></li>
-              <li>Trykk <strong>«Legg til»</strong> øverst til høyre</li>
-            </ol>
-          </div>
+        <div class="modal-section" id="installIosSection" hidden>
+          <div class="modal-label">iPhone / iPad (Safari)</div>
+          <ol class="install-steps">
+            <li>Trykk Del-ikonet <span class="kbd">⬆️</span> nederst i Safari</li>
+            <li>Velg <strong>«Legg til på Hjem-skjerm»</strong></li>
+            <li>Trykk <strong>«Legg til»</strong> øverst til høyre</li>
+          </ol>
+        </div>
 
-          <div class="modal-section" id="installAndroidSection" hidden>
-            <div class="modal-label">Android (Chrome)</div>
-            <ol class="install-steps">
-              <li>Trykk menyknappen <strong>⋮</strong> øverst til høyre</li>
-              <li>Velg <strong>«Legg til på startskjermen»</strong> eller <strong>«Installer app»</strong></li>
-              <li>Bekreft</li>
-            </ol>
-          </div>
+        <div class="modal-section" id="installAndroidSection" hidden>
+          <div class="modal-label">Android (Chrome)</div>
+          <ol class="install-steps">
+            <li>Trykk menyknappen <strong>⋮</strong> øverst til høyre</li>
+            <li>Velg <strong>«Legg til på startskjermen»</strong> eller <strong>«Installer app»</strong></li>
+            <li>Bekreft</li>
+          </ol>
+        </div>
 
-          <div class="modal-section" id="installDesktopSection" hidden>
-            <div class="modal-label">Datamaskin (Chrome / Edge)</div>
-            <ol class="install-steps">
-              <li>Se etter installer-ikonet i adressefeltet (eller menyen ⋮)</li>
-              <li>Velg <strong>«Installer UNIQE»</strong></li>
-            </ol>
-          </div>
+        <div class="modal-section" id="installDesktopSection" hidden>
+          <div class="modal-label">Datamaskin (Chrome / Edge)</div>
+          <ol class="install-steps">
+            <li>Se etter installer-ikonet i adressefeltet (eller menyen ⋮)</li>
+            <li>Velg <strong>«Installer UNIQE»</strong></li>
+          </ol>
         </div>
       </div>
     </div>

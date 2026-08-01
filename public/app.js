@@ -44,7 +44,7 @@ const resetBtn = document.getElementById("resetBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 
 const settingsBtn = document.getElementById("settingsBtn");
-const settingsModal = document.getElementById("settingsModal");
+const settingsView = document.getElementById("settingsView");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const settingsIdentifier = document.getElementById("settingsIdentifier");
 const settingsCreatedAt = document.getElementById("settingsCreatedAt");
@@ -56,6 +56,7 @@ const passwordSubmit = document.getElementById("passwordSubmit");
 const passwordMessage = document.getElementById("passwordMessage");
 
 const enableNotificationsBtn = document.getElementById("enableNotificationsBtn");
+const notificationsStatus = document.getElementById("notificationsStatus");
 const notificationsMessage = document.getElementById("notificationsMessage");
 const installBtn = document.getElementById("installBtn");
 const installModal = document.getElementById("installModal");
@@ -84,6 +85,7 @@ function hideAllAuthCards() {
 function showAuthView() {
   authView.hidden = false;
   chatView.hidden = true;
+  settingsView.hidden = true;
   hideAllAuthCards();
   authCard.hidden = false;
   pendingIdentifier = null;
@@ -97,6 +99,7 @@ function showVerifyView(identifier) {
   verifyError.classList.remove("auth-success");
   authView.hidden = false;
   chatView.hidden = true;
+  settingsView.hidden = true;
   hideAllAuthCards();
   verifyCard.hidden = false;
   verifyCode.focus();
@@ -105,6 +108,7 @@ function showVerifyView(identifier) {
 function showForgotView() {
   authView.hidden = false;
   chatView.hidden = true;
+  settingsView.hidden = true;
   hideAllAuthCards();
   forgotCard.hidden = false;
   forgotForm.reset();
@@ -116,6 +120,7 @@ function showForgotView() {
 function showResetView() {
   authView.hidden = false;
   chatView.hidden = true;
+  settingsView.hidden = true;
   hideAllAuthCards();
   resetCard.hidden = false;
   resetMessage.hidden = true;
@@ -127,6 +132,7 @@ function showChatView(user) {
   currentUser = user;
   authView.hidden = true;
   chatView.hidden = false;
+  settingsView.hidden = true;
   userIndicator.textContent = user.identifier;
   chatEl.innerHTML = "";
   const empty = document.createElement("div");
@@ -177,6 +183,7 @@ authForm.addEventListener("submit", async (e) => {
       return;
     }
     showChatView(data.user);
+    if (data.show_install_prompt) openInstallModal();
   } catch (err) {
     authError.textContent = "Klarte ikke å nå serveren.";
     authError.hidden = false;
@@ -214,6 +221,7 @@ verifyForm.addEventListener("submit", async (e) => {
     }
     verifyForm.reset();
     showChatView(data.user);
+    if (data.show_install_prompt) openInstallModal();
   } catch (err) {
     verifyError.textContent = "Klarte ikke å nå serveren.";
     verifyError.hidden = false;
@@ -343,7 +351,7 @@ resetForm.addEventListener("submit", async (e) => {
   }
 });
 
-// ---------- settings modal ----------
+// ---------- settings page ----------
 
 function formatJoinedDate(unixSeconds) {
   if (!unixSeconds) return "";
@@ -351,7 +359,25 @@ function formatJoinedDate(unixSeconds) {
   return date.toLocaleDateString("nb-NO", { year: "numeric", month: "long", day: "numeric" });
 }
 
-function openSettings() {
+function updateNotificationsStatus() {
+  if (!("Notification" in window)) {
+    notificationsStatus.textContent = "Nettleseren din støtter ikke varsler.";
+    enableNotificationsBtn.hidden = true;
+    return;
+  }
+  enableNotificationsBtn.hidden = false;
+  if (Notification.permission === "granted") {
+    notificationsStatus.textContent = "Varsler er på for denne enheten.";
+    enableNotificationsBtn.textContent = "🔔 På";
+    enableNotificationsBtn.disabled = true;
+  } else {
+    notificationsStatus.textContent = "Få et varsel selv om UNIQE er lukket.";
+    enableNotificationsBtn.textContent = "🔔 Slå på";
+    enableNotificationsBtn.disabled = false;
+  }
+}
+
+function showSettingsView() {
   if (!currentUser) return;
   settingsIdentifier.textContent = currentUser.identifier;
   settingsCreatedAt.textContent = currentUser.created_at
@@ -362,20 +388,20 @@ function openSettings() {
   passwordMessage.classList.remove("auth-success");
   notificationsMessage.hidden = true;
   notificationsMessage.classList.remove("auth-success");
-  settingsModal.hidden = false;
+  updateNotificationsStatus();
+  chatView.hidden = true;
+  settingsView.hidden = false;
 }
 
-function closeSettings() {
-  settingsModal.hidden = true;
+function hideSettingsView() {
+  settingsView.hidden = true;
+  chatView.hidden = false;
 }
 
-settingsBtn.addEventListener("click", openSettings);
-closeSettingsBtn.addEventListener("click", closeSettings);
-settingsModal.addEventListener("click", (e) => {
-  if (e.target === settingsModal) closeSettings();
-});
+settingsBtn.addEventListener("click", showSettingsView);
+closeSettingsBtn.addEventListener("click", hideSettingsView);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !settingsModal.hidden) closeSettings();
+  if (e.key === "Escape" && !settingsView.hidden) hideSettingsView();
 });
 
 passwordForm.addEventListener("submit", async (e) => {
@@ -404,7 +430,6 @@ passwordForm.addEventListener("submit", async (e) => {
     const data = await res.json();
     if (res.status === 401 && data.error === "Du må logge inn først.") {
       showAuthView();
-      closeSettings();
       return;
     }
     if (!res.ok) {
@@ -488,6 +513,7 @@ async function enableNotifications() {
     notificationsMessage.textContent = "Varsler er slått på for denne enheten.";
     notificationsMessage.classList.add("auth-success");
     notificationsMessage.hidden = false;
+    updateNotificationsStatus();
   } catch (err) {
     notificationsMessage.textContent = "Fikk ikke slått på varsler. Prøv igjen.";
     notificationsMessage.hidden = false;

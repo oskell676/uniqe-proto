@@ -644,6 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                 "salt": pending["salt"],
                 "password_hash": pending["password_hash"],
                 "created_at": time.time(),
+                "install_prompt_shown": True,
             }
             users.append(user)
             save_users(users)
@@ -658,7 +659,7 @@ class Handler(BaseHTTPRequestHandler):
             save_sessions(sessions)
 
         self._send_json(
-            {"ok": True, "user": public_user(user)},
+            {"ok": True, "user": public_user(user), "show_install_prompt": True},
             cookie_header=make_session_cookie(token),
         )
 
@@ -721,6 +722,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Feil passord."}, 401)
             return
 
+        show_install_prompt = not user.get("install_prompt_shown", False)
+        if show_install_prompt:
+            with _users_lock:
+                users = load_users()
+                fresh_user = find_user_by_id(users, user["id"])
+                if fresh_user and not fresh_user.get("install_prompt_shown", False):
+                    fresh_user["install_prompt_shown"] = True
+                    save_users(users)
+
         token = secrets.token_urlsafe(32)
         with _sessions_lock:
             sessions = load_sessions()
@@ -728,7 +738,7 @@ class Handler(BaseHTTPRequestHandler):
             save_sessions(sessions)
 
         self._send_json(
-            {"ok": True, "user": public_user(user)},
+            {"ok": True, "user": public_user(user), "show_install_prompt": show_install_prompt},
             cookie_header=make_session_cookie(token),
         )
 
