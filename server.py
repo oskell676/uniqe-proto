@@ -439,7 +439,8 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_header:
             self.send_header("Set-Cookie", cookie_header)
         self.end_headers()
-        self.wfile.write(payload)
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(payload)
 
     def _send_file(self, rel_path, content_type):
         safe_path = os.path.normpath(rel_path).lstrip("/\\")
@@ -455,7 +456,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(data)
 
     def _read_json_body(self):
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -494,6 +496,17 @@ class Handler(BaseHTTPRequestHandler):
         return user_id
 
     # ---------- routing ----------
+
+    def do_HEAD(self):
+        # Link-preview fetchers in messaging apps (iMessage, WhatsApp, etc.)
+        # commonly send a HEAD request before a shared link is allowed to
+        # open. Without this, BaseHTTPRequestHandler's default answers with
+        # 501 Unsupported method, which can make the app refuse the link.
+        self._suppress_body = True
+        try:
+            self.do_GET()
+        finally:
+            self._suppress_body = False
 
     def do_GET(self):
         path = urlparse(self.path).path
