@@ -30,9 +30,11 @@ from urllib.parse import urlparse, urlencode
 
 try:
     from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid02
 except ImportError:
     webpush = None
     WebPushException = Exception
+    Vapid02 = None
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
@@ -53,6 +55,19 @@ PASSWORD_RESET_TTL = 30 * 60  # seconds a password-reset link stays valid
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:main@uniqe-no.com")
+
+# pywebpush's Vapid.from_string() only accepts a bare base64 key or a file
+# path — fed a full PEM block, it strips '\n' and tries to base64-decode the
+# "-----BEGIN/END PRIVATE KEY-----" header text too, producing garbage bytes.
+# Pre-building the Vapid02 instance via from_pem() (which correctly drops the
+# header/footer lines) and passing that instance instead makes webpush() skip
+# from_string() entirely.
+VAPID_KEY = None
+if webpush is not None and VAPID_PRIVATE_KEY:
+    try:
+        VAPID_KEY = Vapid02.from_pem(VAPID_PRIVATE_KEY.encode())
+    except Exception as exc:
+        print(f"⚠️  Kunne ikke laste VAPID-nøkkel: {exc}", flush=True)
 
 SYSTEM_PROMPT = """\
 Du er UNIQE — en varm, ikke-dømmende samtalepartner som alltid er tilgjengelig. Dette er en tidlig prototype som tester konseptet.
@@ -245,7 +260,7 @@ def send_push_notification(user_id, title, body):
     """Send a Web Push notification to every device the user has subscribed
     from. Best-effort: never raises — a dead subscription or missing VAPID
     config must not break the caller's main flow (e.g. a check-in reply)."""
-    if webpush is None or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+    if webpush is None or VAPID_KEY is None or not VAPID_PUBLIC_KEY:
         return
 
     with _users_lock:
@@ -266,7 +281,7 @@ def send_push_notification(user_id, title, body):
             webpush(
                 subscription_info=sub,
                 data=payload,
-                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_private_key=VAPID_KEY,
                 vapid_claims={"sub": VAPID_SUBJECT},
                 timeout=10,
             )
