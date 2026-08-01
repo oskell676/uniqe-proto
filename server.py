@@ -463,24 +463,27 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            salt_hex, pwd_hash = hash_password(password)
-            code = generate_verification_code()
-            now = time.time()
+        # SMTP send happens outside _users_lock — it can take seconds, and
+        # holding a global lock that long would serialize every unrelated
+        # signup request behind it.
+        salt_hex, pwd_hash = hash_password(password)
+        code = generate_verification_code()
+        now = time.time()
+        with _pending_lock:
+            PENDING_SIGNUPS[identifier] = {
+                "salt": salt_hex,
+                "password_hash": pwd_hash,
+                "code": code,
+                "expires_at": now + EMAIL_CODE_TTL,
+                "last_sent_at": now,
+            }
+        error = safe_send_email(send_verification_email, identifier, code)
+        if error:
             with _pending_lock:
-                PENDING_SIGNUPS[identifier] = {
-                    "salt": salt_hex,
-                    "password_hash": pwd_hash,
-                    "code": code,
-                    "expires_at": now + EMAIL_CODE_TTL,
-                    "last_sent_at": now,
-                }
-            error = safe_send_email(send_verification_email, identifier, code)
-            if error:
-                with _pending_lock:
-                    PENDING_SIGNUPS.pop(identifier, None)
-                self._send_json({"error": error}, 502)
-                return
-            self._send_json({"ok": True, "verification_required": True, "identifier": identifier})
+                PENDING_SIGNUPS.pop(identifier, None)
+            self._send_json({"error": error}, 502)
+            return
+        self._send_json({"ok": True, "verification_required": True, "identifier": identifier})
 
     def _handle_verify_email(self):
         body = self._read_json_body()
