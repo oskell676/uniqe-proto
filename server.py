@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import secrets
 import smtplib
@@ -22,12 +23,13 @@ import threading
 import time
 import uuid
 import http.client
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
+from zoneinfo import ZoneInfo
 
 try:
     from pywebpush import webpush, WebPushException
@@ -44,6 +46,7 @@ CONVERSATIONS_DIR = DATA_DIR / "conversations"
 DAYNOTES_DIR = DATA_DIR / "daynotes"
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
+CHECKIN_SCHEDULE_FILE = DATA_DIR / "checkin_schedule.json"
 HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse proxy / in production
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
@@ -56,6 +59,17 @@ RESEND_COOLDOWN = 30  # seconds between resend requests for the same signup
 PASSWORD_RESET_TTL = 30 * 60  # seconds a password-reset link stays valid
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days — also used as the cookie's max-age
 MAX_NEW_DAYNOTES_PER_REQUEST = 8  # cap Claude calls per /api/calendar request
+
+DEFAULT_TIMEZONE = "Europe/Oslo"
+CHECKIN_POLL_INTERVAL = 300  # seconds between scheduler ticks
+CHECKIN_GRACE_SECONDS = 2 * 60 * 60  # skip a slot instead of firing it hours late
+# Two randomized windows per local day — morning and afternoon/evening —
+# so the two daily check-ins land at genuinely different, non-round times
+# instead of e.g. always around noon.
+CHECKIN_WINDOWS = [
+    (8, 0, 12, 30),
+    (15, 30, 21, 30),
+]
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
@@ -105,6 +119,7 @@ CHECKIN_INSTRUCTION = (
 
 _conversation_lock = threading.Lock()
 _daynotes_lock = threading.Lock()
+_schedule_lock = threading.Lock()
 _users_lock = threading.Lock()
 _sessions_lock = threading.Lock()
 _pending_lock = threading.Lock()
@@ -123,6 +138,20 @@ def normalize_identifier(raw):
     if not raw:
         return None
     return raw if EMAIL_RE.match(raw) else None
+
+
+def normalize_timezone(raw):
+    """Return a valid IANA timezone name, or None if missing/invalid. The
+    client sends its own Intl.DateTimeFormat() timezone on login/signup, so
+    the automated check-in scheduler can fire at sensible local times."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        ZoneInfo(raw)
+    except Exception:
+        return None
+    return raw
 
 
 def hash_password(password, salt_hex=None):
@@ -513,6 +542,124 @@ def generate_day_note(day_messages):
     return {"note": note, "positive": positive}
 
 
+def perform_checkin(user_id):
+    """Generate and store a proactive check-in reply for user_id, and push a
+    notification for it. Shared by the manual "Simuler innsjekk" button and
+    the automated scheduler. Returns the reply text, or None on failure —
+    callers must treat this as best-effort."""
+    with _conversation_lock:
+        stored = load_conversation(user_id)
+        api_messages = to_api_messages(stored)
+        api_messages.append({"role": "user", "content": CHECKIN_INSTRUCTION})
+
+        try:
+            reply = call_claude(api_messages, effort="low", max_tokens=400)
+        except RuntimeError as exc:
+            print(f"⚠️  Innsjekk feilet for {user_id}: {exc}", flush=True)
+            return None
+
+        stored.append({
+            "role": "assistant",
+            "content": reply,
+            "ts": time.time(),
+            "proactive": True,
+        })
+        save_conversation(user_id, stored)
+
+    preview = reply if len(reply) <= 150 else reply[:147] + "..."
+    send_push_notification(user_id, "UNIQE", preview)
+    return reply
+
+
+# ---------- automated check-in scheduler ----------
+# Twice a day, at a randomized (non-round) time within a morning and an
+# evening window, in each user's own local timezone — the core "UNIQE
+# reaches out first" behavior, running unattended in the background.
+
+def get_user_zoneinfo(user):
+    tz_name = user.get("timezone") or DEFAULT_TIMEZONE
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def generate_daily_schedule(local_date, tz):
+    times = []
+    for start_h, start_m, end_h, end_m in CHECKIN_WINDOWS:
+        start_dt = datetime(local_date.year, local_date.month, local_date.day, start_h, start_m, tzinfo=tz)
+        end_dt = datetime(local_date.year, local_date.month, local_date.day, end_h, end_m, tzinfo=tz)
+        span_seconds = int((end_dt - start_dt).total_seconds())
+        offset = random.randint(0, span_seconds)
+        times.append((start_dt + timedelta(seconds=offset)).timestamp())
+    return sorted(times)
+
+
+def load_checkin_schedule():
+    if not CHECKIN_SCHEDULE_FILE.exists():
+        return {}
+    try:
+        return json.loads(CHECKIN_SCHEDULE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_checkin_schedule(schedule):
+    CHECKIN_SCHEDULE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHECKIN_SCHEDULE_FILE.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_checkin_scheduler_tick():
+    with _users_lock:
+        users = load_users()
+    with _schedule_lock:
+        schedule = load_checkin_schedule()
+
+    now = time.time()
+    due_user_ids = []
+    changed = False
+
+    for user in users:
+        user_id = user["id"]
+        tz = get_user_zoneinfo(user)
+        local_today = datetime.now(tz).date()
+        local_today_str = local_today.isoformat()
+
+        entry = schedule.get(user_id)
+        if not entry or entry.get("date") != local_today_str:
+            times = generate_daily_schedule(local_today, tz)
+            entry = {"date": local_today_str, "times": times, "fired": [False] * len(times)}
+            schedule[user_id] = entry
+            changed = True
+
+        for i, scheduled_at in enumerate(entry["times"]):
+            if entry["fired"][i] or now < scheduled_at:
+                continue
+            entry["fired"][i] = True
+            changed = True
+            if now - scheduled_at <= CHECKIN_GRACE_SECONDS:
+                due_user_ids.append(user_id)
+            # else: we fell far behind (e.g. the server was down) — mark it
+            # fired without sending, rather than surprise someone with a
+            # "good morning" message hours late.
+
+    if changed:
+        with _schedule_lock:
+            save_checkin_schedule(schedule)
+
+    for user_id in due_user_ids:
+        perform_checkin(user_id)
+
+
+def checkin_scheduler_loop():
+    while True:
+        try:
+            run_checkin_scheduler_tick()
+        except Exception as exc:
+            print(f"⚠️  Feil i innsjekk-planlegger: {exc}", flush=True)
+        time.sleep(CHECKIN_POLL_INTERVAL)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "UNIQE/0.2"
 
@@ -733,6 +880,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         code = (body.get("code") or "").strip()
+        tz_name = normalize_timezone(body.get("timezone"))
 
         if not identifier:
             self._send_json({"error": "Ugyldig e-postadresse."}, 400)
@@ -765,6 +913,7 @@ class Handler(BaseHTTPRequestHandler):
                 "password_hash": pending["password_hash"],
                 "created_at": time.time(),
                 "install_prompt_shown": True,
+                "timezone": tz_name or DEFAULT_TIMEZONE,
             }
             users.append(user)
             save_users(users)
@@ -819,6 +968,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         password = body.get("password") or ""
+        tz_name = normalize_timezone(body.get("timezone"))
 
         if not identifier:
             self._send_json({"error": "Skriv inn en gyldig e-postadresse."}, 400)
@@ -843,12 +993,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         show_install_prompt = not user.get("install_prompt_shown", False)
-        if show_install_prompt:
+        tz_changed = bool(tz_name and user.get("timezone") != tz_name)
+        if show_install_prompt or tz_changed:
             with _users_lock:
                 users = load_users()
                 fresh_user = find_user_by_id(users, user["id"])
-                if fresh_user and not fresh_user.get("install_prompt_shown", False):
-                    fresh_user["install_prompt_shown"] = True
+                if fresh_user:
+                    if not fresh_user.get("install_prompt_shown", False):
+                        fresh_user["install_prompt_shown"] = True
+                    if tz_name and fresh_user.get("timezone") != tz_name:
+                        fresh_user["timezone"] = tz_name
                     save_users(users)
 
         token = secrets.token_urlsafe(32)
@@ -1109,27 +1263,10 @@ class Handler(BaseHTTPRequestHandler):
         if not user_id:
             return
 
-        with _conversation_lock:
-            stored = load_conversation(user_id)
-            api_messages = to_api_messages(stored)
-            api_messages.append({"role": "user", "content": CHECKIN_INSTRUCTION})
-
-            try:
-                reply = call_claude(api_messages, effort="low", max_tokens=400)
-            except RuntimeError as exc:
-                self._send_json({"error": str(exc)}, 500)
-                return
-
-            stored.append({
-                "role": "assistant",
-                "content": reply,
-                "ts": time.time(),
-                "proactive": True,
-            })
-            save_conversation(user_id, stored)
-
-        preview = reply if len(reply) <= 150 else reply[:147] + "..."
-        send_push_notification(user_id, "UNIQE", preview)
+        reply = perform_checkin(user_id)
+        if reply is None:
+            self._send_json({"error": "Klarte ikke å generere en innsjekk akkurat nå."}, 500)
+            return
 
         self._send_json({"reply": reply, "proactive": True})
 
@@ -1160,6 +1297,7 @@ def main():
             "den til i en .env-fil (se .env.example) eller eksporterer den selv.",
             flush=True,
         )
+    threading.Thread(target=checkin_scheduler_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"UNIQE-prototype kjører på http://{HOST}:{PORT}", flush=True)
     try:

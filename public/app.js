@@ -94,6 +94,14 @@ let calendarMonth = null; // 1-12
 let calendarDays = {}; // date string -> {note, positive}
 let selectedCalendarDate = null;
 
+function getUserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch (err) {
+    return "";
+  }
+}
+
 // ---------- view switching ----------
 
 function hideAllAuthCards() {
@@ -195,7 +203,7 @@ authForm.addEventListener("submit", async (e) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ identifier, password }),
+      body: JSON.stringify({ identifier, password, timezone: getUserTimezone() }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -237,7 +245,11 @@ verifyForm.addEventListener("submit", async (e) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ identifier: pendingIdentifier, code: verifyCode.value.trim() }),
+      body: JSON.stringify({
+        identifier: pendingIdentifier,
+        code: verifyCode.value.trim(),
+        timezone: getUserTimezone(),
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
