@@ -103,6 +103,7 @@
         <div class="actions">
           <span id="userIndicator" class="user-indicator"></span>
           <button id="checkinBtn" class="ghost-btn">☀️ Simuler innsjekk</button>
+          <button id="calendarBtn" class="text-btn" title="Kalender">Kalender</button>
           <button id="settingsBtn" class="text-btn" title="Innstillinger">Innstillinger</button>
           <button id="resetBtn" class="text-btn" title="Slett samtalen og start på nytt">Nullstill</button>
           <button id="logoutBtn" class="text-btn">Logg ut</button>
@@ -135,46 +136,103 @@
       </header>
 
       <main class="settings-content">
-        <div class="modal-section">
-          <div class="modal-label">Konto</div>
-          <div class="modal-value" id="settingsIdentifier"></div>
-          <div class="modal-hint" id="settingsCreatedAt"></div>
+        <div id="settingsFolderList" class="folder-list">
+          <button type="button" class="folder-row" data-folder="account">
+            <span>Konto</span>
+            <span class="folder-row-hint">E-post og brukerinfo <span class="chevron">›</span></span>
+          </button>
+          <button type="button" class="folder-row" data-folder="password">
+            <span>Passord</span>
+            <span class="folder-row-hint">Endre passordet ditt <span class="chevron">›</span></span>
+          </button>
+          <button type="button" class="folder-row" data-folder="permissions">
+            <span>Tillatelser</span>
+            <span class="folder-row-hint">Varslinger og hjemskjerm <span class="chevron">›</span></span>
+          </button>
         </div>
 
-        <div class="modal-section">
-          <div class="modal-label">Endre passord</div>
-          <form id="passwordForm" class="auth-form">
-            <input type="password" id="currentPassword" placeholder="Nåværende passord"
-                   autocomplete="current-password" required>
-            <input type="password" id="newPassword" placeholder="Nytt passord"
-                   autocomplete="new-password" required minlength="6">
-            <input type="password" id="confirmPassword" placeholder="Bekreft nytt passord"
-                   autocomplete="new-password" required minlength="6">
-            <button type="submit" id="passwordSubmit">Oppdater passord</button>
-          </form>
-          <div id="passwordMessage" class="auth-error" hidden></div>
-        </div>
-
-        <div class="modal-section">
-          <div class="modal-label">Tillatelser</div>
-
-          <div class="permission-row">
-            <div>
-              <div class="modal-value">Varslinger</div>
-              <div class="modal-hint" id="notificationsStatus">Få et varsel selv om UNIQE er lukket.</div>
-            </div>
-            <button type="button" id="enableNotificationsBtn" class="ghost-btn">🔔 Slå på</button>
-          </div>
-          <div id="notificationsMessage" class="auth-error" hidden></div>
-
-          <div class="permission-row">
-            <div>
-              <div class="modal-value">Hjemskjerm</div>
-              <div class="modal-hint">Legg UNIQE til på hjemskjermen din.</div>
-            </div>
-            <button type="button" id="installBtn" class="ghost-btn">📲 Vis hvordan</button>
+        <div id="settingsFolderAccount" class="settings-folder" hidden>
+          <button type="button" class="folder-back">← Innstillinger</button>
+          <div class="modal-section">
+            <div class="modal-label">Konto</div>
+            <div class="modal-value" id="settingsIdentifier"></div>
+            <div class="modal-hint" id="settingsCreatedAt"></div>
           </div>
         </div>
+
+        <div id="settingsFolderPassword" class="settings-folder" hidden>
+          <button type="button" class="folder-back">← Innstillinger</button>
+          <div class="modal-section">
+            <div class="modal-label">Endre passord</div>
+            <form id="passwordForm" class="auth-form">
+              <input type="password" id="currentPassword" placeholder="Nåværende passord"
+                     autocomplete="current-password" required>
+              <input type="password" id="newPassword" placeholder="Nytt passord"
+                     autocomplete="new-password" required minlength="6">
+              <input type="password" id="confirmPassword" placeholder="Bekreft nytt passord"
+                     autocomplete="new-password" required minlength="6">
+              <button type="submit" id="passwordSubmit">Oppdater passord</button>
+            </form>
+            <div id="passwordMessage" class="auth-error" hidden></div>
+          </div>
+        </div>
+
+        <div id="settingsFolderPermissions" class="settings-folder" hidden>
+          <button type="button" class="folder-back">← Innstillinger</button>
+          <div class="modal-section">
+            <div class="modal-label">Tillatelser</div>
+
+            <div class="permission-row">
+              <div>
+                <div class="modal-value">Varslinger</div>
+                <div class="modal-hint" id="notificationsStatus">Få et varsel selv om UNIQE er lukket.</div>
+              </div>
+              <button type="button" id="enableNotificationsBtn" class="ghost-btn">🔔 Slå på</button>
+            </div>
+            <div id="notificationsMessage" class="auth-error" hidden></div>
+
+            <div class="permission-row">
+              <div>
+                <div class="modal-value">Hjemskjerm</div>
+                <div class="modal-hint">Legg UNIQE til på hjemskjermen din.</div>
+              </div>
+              <button type="button" id="installBtn" class="ghost-btn">📲 Vis hvordan</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="calendarView" class="chat-view" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span> UNIQE <span class="tag">· kalender</span></div>
+        <div class="actions">
+          <button id="closeCalendarBtn" class="text-btn">← Tilbake</button>
+        </div>
+      </header>
+
+      <main class="calendar-content">
+        <div class="calendar-nav">
+          <button type="button" id="calendarPrevBtn" class="text-btn" aria-label="Forrige måned">‹</button>
+          <div class="calendar-month-label" id="calendarMonthLabel"></div>
+          <button type="button" id="calendarNextBtn" class="text-btn" aria-label="Neste måned">›</button>
+        </div>
+
+        <div class="calendar-weekdays">
+          <span>Man</span><span>Tir</span><span>Ons</span><span>Tor</span><span>Fre</span><span>Lør</span><span>Søn</span>
+        </div>
+
+        <div class="calendar-grid" id="calendarGrid"></div>
+
+        <div class="calendar-hint">Dager du har snakket med UNIQE får et lite merke. Trykk på en dag for å se notatet.</div>
+
+        <div class="calendar-detail" id="calendarDetail" hidden>
+          <div class="modal-label" id="calendarDetailDate"></div>
+          <div class="calendar-detail-note" id="calendarDetailNote"></div>
+          <div class="calendar-detail-positive" id="calendarDetailPositive"></div>
+        </div>
+
+        <div class="calendar-loading" id="calendarLoading" hidden>Henter kalenderen…</div>
       </main>
     </div>
 

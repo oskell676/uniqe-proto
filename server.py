@@ -22,11 +22,12 @@ import threading
 import time
 import uuid
 import http.client
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse, urlencode, parse_qs
 
 try:
     from pywebpush import webpush, WebPushException
@@ -40,6 +41,7 @@ ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
+DAYNOTES_DIR = DATA_DIR / "daynotes"
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse proxy / in production
@@ -53,6 +55,7 @@ EMAIL_CODE_TTL = 15 * 60  # seconds a verification code stays valid
 RESEND_COOLDOWN = 30  # seconds between resend requests for the same signup
 PASSWORD_RESET_TTL = 30 * 60  # seconds a password-reset link stays valid
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days — also used as the cookie's max-age
+MAX_NEW_DAYNOTES_PER_REQUEST = 8  # cap Claude calls per /api/calendar request
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
@@ -101,6 +104,7 @@ CHECKIN_INSTRUCTION = (
 )
 
 _conversation_lock = threading.Lock()
+_daynotes_lock = threading.Lock()
 _users_lock = threading.Lock()
 _sessions_lock = threading.Lock()
 _pending_lock = threading.Lock()
@@ -364,7 +368,45 @@ def save_conversation(user_id, messages):
     path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def call_claude(api_messages, effort="medium", max_tokens=1024):
+# ---------- calendar day-notes (per user) ----------
+# One cached {note, positive} pair per calendar day (UTC), generated lazily
+# the first time that day is viewed — never regenerated afterwards, and never
+# generated during normal chatting, so browsing the calendar is the only
+# extra Claude usage this feature adds.
+
+def daynotes_path(user_id):
+    return DAYNOTES_DIR / f"{user_id}.json"
+
+
+def load_day_notes(user_id):
+    path = daynotes_path(user_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_day_notes(user_id, notes):
+    path = daynotes_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def group_messages_by_date(messages):
+    """Group stored messages by their UTC calendar date (YYYY-MM-DD)."""
+    by_date = {}
+    for m in messages:
+        ts = m.get("ts")
+        if not ts:
+            continue
+        date_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        by_date.setdefault(date_str, []).append(m)
+    return by_date
+
+
+def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PROMPT):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -376,7 +418,7 @@ def call_claude(api_messages, effort="medium", max_tokens=1024):
     body = json.dumps({
         "model": MODEL,
         "max_tokens": max_tokens,
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "output_config": {"effort": effort},
         "messages": api_messages,
     })
@@ -421,6 +463,54 @@ def to_api_messages(stored):
     """Convert stored history into the {role, content} shape the API expects."""
     trimmed = stored[-MAX_HISTORY_TURNS_SENT:]
     return [{"role": m["role"], "content": m["content"]} for m in trimmed]
+
+
+DAYNOTE_SYSTEM_PROMPT = """\
+Du leser meldingene fra én enkelt dag i en privat samtale mellom en bruker og \
+AI-følgesvennen deres, UNIQE. Dette er kun for å lage et kort kalendernotat \
+til brukeren selv — det vises aldri til noen andre.
+
+Vær ærlig og varm, ikke påtatt positiv. Hvis dagen var tung eller vanskelig, kan \
+det positive være noe lite og ekte — for eksempel at brukeren satte ord på noe \
+vanskelig, eller tok seg tid til å snakke. Ikke bagatelliser eller pynt på noe \
+som var vondt.
+"""
+
+DAYNOTE_INSTRUCTION = (
+    "[Instruks til deg selv, ikke synlig for brukeren: Analyser samtalen over "
+    "fra denne ene dagen, og svar med NØYAKTIG to linjer i dette formatet, "
+    "uten noe annet tekst før eller etter:\n"
+    "NOTAT: <et kort stikkord eller en kort setning som fanger essensen av dagen, maks 6 ord>\n"
+    "POSITIVT: <én ting fra dagen som var bra, fint, eller verdt å legge merke til, maks 12 ord>]"
+)
+
+
+def generate_day_note(day_messages):
+    """Best-effort: returns {"note", "positive"} or None on any failure —
+    a missing calendar note must never break the page."""
+    api_messages = to_api_messages(day_messages)
+    api_messages.append({"role": "user", "content": DAYNOTE_INSTRUCTION})
+    try:
+        reply = call_claude(
+            api_messages,
+            effort="low",
+            max_tokens=120,
+            system=DAYNOTE_SYSTEM_PROMPT,
+        )
+    except RuntimeError as exc:
+        print(f"⚠️  Kunne ikke generere kalendernotat: {exc}", flush=True)
+        return None
+
+    note, positive = None, None
+    for line in reply.splitlines():
+        line = line.strip()
+        if line.upper().startswith("NOTAT:"):
+            note = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("POSITIVT:"):
+            positive = line.split(":", 1)[1].strip()
+    if not note or not positive:
+        return None
+    return {"note": note, "positive": positive}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -554,6 +644,8 @@ class Handler(BaseHTTPRequestHandler):
             with _conversation_lock:
                 messages = load_conversation(user_id)
             self._send_json({"messages": messages})
+        elif path == "/api/calendar":
+            self._handle_calendar()
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -927,6 +1019,57 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "not authenticated"}, 401)
             return
         self._send_json({"user": public_user(user)})
+
+    def _handle_calendar(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        query = parse_qs(urlparse(self.path).query)
+        month_param = (query.get("month") or [""])[0]
+        try:
+            year_str, month_str = month_param.split("-")
+            year, month = int(year_str), int(month_str)
+            if not 1 <= month <= 12:
+                raise ValueError
+        except ValueError:
+            now = datetime.now(timezone.utc)
+            year, month = now.year, now.month
+
+        with _conversation_lock:
+            messages = load_conversation(user_id)
+        by_date = {
+            date_str: day_messages
+            for date_str, day_messages in group_messages_by_date(messages).items()
+            if date_str.startswith(f"{year:04d}-{month:02d}")
+        }
+
+        with _daynotes_lock:
+            notes = load_day_notes(user_id)
+
+        # Generating a note calls Claude, so this only happens the first time
+        # a given day is viewed — capped per request so opening a month with
+        # lots of unseen history can't trigger a long chain of API calls.
+        newly_generated = {}
+        for date_str, day_messages in by_date.items():
+            if date_str in notes:
+                continue
+            if len(newly_generated) >= MAX_NEW_DAYNOTES_PER_REQUEST:
+                continue
+            note = generate_day_note(day_messages)
+            if note:
+                newly_generated[date_str] = note
+
+        if newly_generated:
+            with _daynotes_lock:
+                fresh = load_day_notes(user_id)
+                for date_str, note in newly_generated.items():
+                    fresh.setdefault(date_str, note)
+                save_day_notes(user_id, fresh)
+            notes.update(newly_generated)
+
+        result_days = {date_str: notes[date_str] for date_str in by_date if date_str in notes}
+        self._send_json({"days": result_days})
 
     # ---------- chat endpoints ----------
 

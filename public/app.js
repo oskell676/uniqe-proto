@@ -46,6 +46,10 @@ const logoutBtn = document.getElementById("logoutBtn");
 const settingsBtn = document.getElementById("settingsBtn");
 const settingsView = document.getElementById("settingsView");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
+const settingsFolderList = document.getElementById("settingsFolderList");
+const settingsFolders = document.querySelectorAll(".settings-folder");
+const folderRows = document.querySelectorAll(".folder-row");
+const folderBackBtns = document.querySelectorAll(".folder-back");
 const settingsIdentifier = document.getElementById("settingsIdentifier");
 const settingsCreatedAt = document.getElementById("settingsCreatedAt");
 const passwordForm = document.getElementById("passwordForm");
@@ -67,11 +71,28 @@ const installIosSection = document.getElementById("installIosSection");
 const installAndroidSection = document.getElementById("installAndroidSection");
 const installDesktopSection = document.getElementById("installDesktopSection");
 
+const calendarBtn = document.getElementById("calendarBtn");
+const calendarView = document.getElementById("calendarView");
+const closeCalendarBtn = document.getElementById("closeCalendarBtn");
+const calendarPrevBtn = document.getElementById("calendarPrevBtn");
+const calendarNextBtn = document.getElementById("calendarNextBtn");
+const calendarMonthLabel = document.getElementById("calendarMonthLabel");
+const calendarGrid = document.getElementById("calendarGrid");
+const calendarDetail = document.getElementById("calendarDetail");
+const calendarDetailDate = document.getElementById("calendarDetailDate");
+const calendarDetailNote = document.getElementById("calendarDetailNote");
+const calendarDetailPositive = document.getElementById("calendarDetailPositive");
+const calendarLoading = document.getElementById("calendarLoading");
+
 let authMode = "login"; // or "signup"
 let currentUser = null;
 let pendingIdentifier = null;
 let deferredInstallPrompt = null;
 let resetToken = null;
+let calendarYear = null;
+let calendarMonth = null; // 1-12
+let calendarDays = {}; // date string -> {note, positive}
+let selectedCalendarDate = null;
 
 // ---------- view switching ----------
 
@@ -86,6 +107,7 @@ function showAuthView() {
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
+  calendarView.hidden = true;
   hideAllAuthCards();
   authCard.hidden = false;
   pendingIdentifier = null;
@@ -100,6 +122,7 @@ function showVerifyView(identifier) {
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
+  calendarView.hidden = true;
   hideAllAuthCards();
   verifyCard.hidden = false;
   verifyCode.focus();
@@ -109,6 +132,7 @@ function showForgotView() {
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
+  calendarView.hidden = true;
   hideAllAuthCards();
   forgotCard.hidden = false;
   forgotForm.reset();
@@ -121,6 +145,7 @@ function showResetView() {
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
+  calendarView.hidden = true;
   hideAllAuthCards();
   resetCard.hidden = false;
   resetMessage.hidden = true;
@@ -133,6 +158,7 @@ function showChatView(user) {
   authView.hidden = true;
   chatView.hidden = false;
   settingsView.hidden = true;
+  calendarView.hidden = true;
   userIndicator.textContent = user.identifier;
   chatEl.innerHTML = "";
   const empty = document.createElement("div");
@@ -377,6 +403,24 @@ function updateNotificationsStatus() {
   }
 }
 
+function showSettingsFolderList() {
+  settingsFolderList.hidden = false;
+  settingsFolders.forEach((el) => { el.hidden = true; });
+}
+
+function showSettingsFolder(name) {
+  const targetId = "settingsFolder" + name.charAt(0).toUpperCase() + name.slice(1);
+  settingsFolderList.hidden = true;
+  settingsFolders.forEach((el) => { el.hidden = el.id !== targetId; });
+}
+
+folderRows.forEach((row) => {
+  row.addEventListener("click", () => showSettingsFolder(row.dataset.folder));
+});
+folderBackBtns.forEach((btn) => {
+  btn.addEventListener("click", showSettingsFolderList);
+});
+
 function showSettingsView() {
   if (!currentUser) return;
   settingsIdentifier.textContent = currentUser.identifier;
@@ -389,12 +433,15 @@ function showSettingsView() {
   notificationsMessage.hidden = true;
   notificationsMessage.classList.remove("auth-success");
   updateNotificationsStatus();
+  showSettingsFolderList();
   chatView.hidden = true;
+  calendarView.hidden = true;
   settingsView.hidden = false;
 }
 
 function hideSettingsView() {
   settingsView.hidden = true;
+  calendarView.hidden = true;
   chatView.hidden = false;
 }
 
@@ -402,6 +449,7 @@ settingsBtn.addEventListener("click", showSettingsView);
 closeSettingsBtn.addEventListener("click", hideSettingsView);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !settingsView.hidden) hideSettingsView();
+  if (e.key === "Escape" && !calendarView.hidden) hideCalendarView();
 });
 
 passwordForm.addEventListener("submit", async (e) => {
@@ -448,6 +496,127 @@ passwordForm.addEventListener("submit", async (e) => {
     passwordSubmit.disabled = false;
   }
 });
+
+// ---------- calendar ----------
+
+const CALENDAR_MONTH_NAMES = [
+  "januar", "februar", "mars", "april", "mai", "juni",
+  "juli", "august", "september", "oktober", "november", "desember",
+];
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function daysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+function firstWeekdayOffset(year, month) {
+  const jsDay = new Date(year, month - 1, 1).getDay(); // 0=Sun..6=Sat
+  return (jsDay + 6) % 7; // convert to Monday-first: 0=Man..6=Søn
+}
+
+function renderCalendarGrid() {
+  calendarMonthLabel.textContent = `${CALENDAR_MONTH_NAMES[calendarMonth - 1]} ${calendarYear}`;
+  calendarGrid.innerHTML = "";
+
+  const offset = firstWeekdayOffset(calendarYear, calendarMonth);
+  const total = daysInMonth(calendarYear, calendarMonth);
+
+  for (let i = 0; i < offset; i++) {
+    const filler = document.createElement("button");
+    filler.className = "calendar-day";
+    filler.type = "button";
+    filler.disabled = true;
+    calendarGrid.appendChild(filler);
+  }
+
+  for (let day = 1; day <= total; day++) {
+    const dateStr = `${calendarYear}-${pad2(calendarMonth)}-${pad2(day)}`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "calendar-day";
+    btn.textContent = String(day);
+    if (calendarDays[dateStr]) btn.classList.add("has-note");
+    if (dateStr === selectedCalendarDate) btn.classList.add("selected");
+    btn.addEventListener("click", () => selectCalendarDate(dateStr));
+    calendarGrid.appendChild(btn);
+  }
+}
+
+function selectCalendarDate(dateStr) {
+  const entry = calendarDays[dateStr];
+  if (!entry) {
+    selectedCalendarDate = null;
+    calendarDetail.hidden = true;
+    renderCalendarGrid();
+    return;
+  }
+  selectedCalendarDate = dateStr;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const label = new Date(y, m - 1, d).toLocaleDateString("nb-NO", {
+    weekday: "long", day: "numeric", month: "long",
+  });
+  calendarDetailDate.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+  calendarDetailNote.textContent = entry.note;
+  calendarDetailPositive.textContent = entry.positive;
+  calendarDetail.hidden = false;
+  renderCalendarGrid();
+}
+
+async function loadCalendarMonth() {
+  calendarLoading.hidden = false;
+  calendarDetail.hidden = true;
+  selectedCalendarDate = null;
+  calendarGrid.innerHTML = "";
+  try {
+    const monthParam = `${calendarYear}-${pad2(calendarMonth)}`;
+    const res = await fetch(`/api/calendar?month=${monthParam}`, { credentials: "same-origin" });
+    if (res.status === 401) {
+      showAuthView();
+      return;
+    }
+    const data = await res.json();
+    calendarDays = data.days || {};
+  } catch (err) {
+    calendarDays = {};
+  } finally {
+    calendarLoading.hidden = true;
+    renderCalendarGrid();
+  }
+}
+
+function showCalendarView() {
+  if (!currentUser) return;
+  const now = new Date();
+  calendarYear = now.getFullYear();
+  calendarMonth = now.getMonth() + 1;
+  chatView.hidden = true;
+  settingsView.hidden = true;
+  calendarView.hidden = false;
+  loadCalendarMonth();
+}
+
+function hideCalendarView() {
+  calendarView.hidden = true;
+  chatView.hidden = false;
+}
+
+function shiftCalendarMonth(delta) {
+  let m = calendarMonth + delta;
+  let y = calendarYear;
+  if (m < 1) { m = 12; y -= 1; }
+  if (m > 12) { m = 1; y += 1; }
+  calendarMonth = m;
+  calendarYear = y;
+  loadCalendarMonth();
+}
+
+calendarBtn.addEventListener("click", showCalendarView);
+closeCalendarBtn.addEventListener("click", hideCalendarView);
+calendarPrevBtn.addEventListener("click", () => shiftCalendarMonth(-1));
+calendarNextBtn.addEventListener("click", () => shiftCalendarMonth(1));
 
 // ---------- service worker + push notifications ----------
 
