@@ -72,6 +72,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
 DAYNOTES_DIR = DATA_DIR / "daynotes"
 SUMMARIES_DIR = DATA_DIR / "summaries"
+USAGE_LOG_FILE = DATA_DIR / "usage_log.json"
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 CHECKIN_SCHEDULE_FILE = DATA_DIR / "checkin_schedule.json"
@@ -79,6 +80,13 @@ HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse pr
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
 MODEL = "claude-sonnet-5"
+NOK_PER_USD = 10.5  # rough conversion, only used for the admin cost estimate
+# Claude Sonnet 5 pricing per million tokens, converted to kr. Cache reads are
+# ~10% of normal input price; cache writes (5-min ephemeral) are ~1.25x.
+KR_PER_1M_INPUT = 3.0 * NOK_PER_USD
+KR_PER_1M_OUTPUT = 15.0 * NOK_PER_USD
+KR_PER_1M_CACHE_READ = 0.3 * NOK_PER_USD
+KR_PER_1M_CACHE_WRITE = 3.75 * NOK_PER_USD
 MAX_HISTORY_TURNS_SENT = 30  # how many recent messages to feed back to the model in full
 SUMMARY_REFRESH_INTERVAL = 20  # regenerate the rolling summary every N newly-aged-out messages
 SESSION_COOKIE_NAME = "uniqe_session"
@@ -176,6 +184,7 @@ def _get_conversation_lock(user_id):
 
 _daynotes_lock = threading.Lock()
 _summaries_lock = threading.Lock()
+_usage_lock = threading.Lock()
 _schedule_lock = threading.Lock()
 _users_lock = threading.Lock()
 _sessions_lock = threading.Lock()
@@ -493,6 +502,77 @@ def group_messages_by_date(messages):
     return by_date
 
 
+# ---------- AI usage tracking (for the admin cost estimate) ----------
+# One counter per calendar day (UTC), covering every call_claude() call —
+# chat, check-ins, day-notes, summaries alike — so the admin dashboard's
+# cost estimate reflects real billed tokens instead of a rough per-message
+# guess. Day-level granularity keeps this small and simple; per-message
+# detail isn't needed for a monthly estimate.
+
+def load_usage_log():
+    if not USAGE_LOG_FILE.exists():
+        return {}
+    try:
+        return json.loads(USAGE_LOG_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_usage_log(log):
+    USAGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USAGE_LOG_FILE.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def record_usage(usage):
+    """Best-effort: folds one API call's token usage into today's running
+    total. Never raises — a missed usage record must never break the
+    caller's actual reply."""
+    if not usage:
+        return
+    try:
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with _usage_lock:
+            log = load_usage_log()
+            day = log.setdefault(date_str, {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "calls": 0,
+            })
+            day["input_tokens"] += usage.get("input_tokens", 0) or 0
+            day["output_tokens"] += usage.get("output_tokens", 0) or 0
+            day["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+            day["cache_creation_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+            day["calls"] += 1
+            save_usage_log(log)
+    except Exception as exc:
+        print(f"⚠️  Kunne ikke lagre token-bruk: {exc}", flush=True)
+
+
+def compute_actual_ai_cost_kr(days=7):
+    """Sum real usage over the last `days` days and project it to a month."""
+    with _usage_lock:
+        log = load_usage_log()
+
+    totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
+    today = datetime.now(timezone.utc).date()
+    for i in range(days):
+        day = log.get((today - timedelta(days=i)).isoformat())
+        if not day:
+            continue
+        for key in totals:
+            totals[key] += day.get(key, 0)
+
+    cost_over_window = (
+        totals["input_tokens"] / 1_000_000 * KR_PER_1M_INPUT
+        + totals["output_tokens"] / 1_000_000 * KR_PER_1M_OUTPUT
+        + totals["cache_read_tokens"] / 1_000_000 * KR_PER_1M_CACHE_READ
+        + totals["cache_creation_tokens"] / 1_000_000 * KR_PER_1M_CACHE_WRITE
+    )
+    return cost_over_window / days * 30
+
+
 def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PROMPT):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -553,6 +633,8 @@ def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PR
     if resp.status != 200:
         message = (data.get("error") or {}).get("message", "Ukjent feil fra Anthropic API")
         raise RuntimeError(f"Anthropic API-feil ({resp.status}): {message}")
+
+    record_usage(data.get("usage"))
 
     if data.get("stop_reason") == "refusal":
         return (
@@ -857,9 +939,6 @@ def checkin_scheduler_loop():
 # Aggregate counts only — never conversation content. Gated behind
 # ADMIN_EMAILS so it's fully disabled unless explicitly configured.
 
-EST_KR_PER_MESSAGE = 0.071  # rough blended Sonnet 5 cost per chat message, from the earlier cost model
-EST_KR_PER_USER_CHECKINS = 2.5  # flat monthly cost of the twice-daily automated check-ins
-
 
 def compute_admin_stats():
     with _users_lock:
@@ -889,11 +968,7 @@ def compute_admin_stats():
                     if ts >= day_ago:
                         active_24h.add(u["id"])
 
-    projected_monthly_messages = messages_7d / 7 * 30
-    estimated_monthly_ai_cost_kr = (
-        projected_monthly_messages * EST_KR_PER_MESSAGE
-        + len(users) * EST_KR_PER_USER_CHECKINS
-    )
+    estimated_monthly_ai_cost_kr = compute_actual_ai_cost_kr(days=7)
 
     return {
         "total_users": len(users),
