@@ -291,6 +291,16 @@
         <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her. Faste kostnader er hosting (Fly.io); variable kostnader er reelt Claude API-forbruk siste 7 dager, projisert til en måned.</p>
         <div class="calendar-loading" id="adminLoading" hidden>Henter tall…</div>
         <div class="calendar-loading" id="adminError" hidden></div>
+
+        <div class="modal-section">
+          <div class="modal-label">Simuler innsjekk for en bruker</div>
+          <form id="adminCheckinForm" class="auth-form">
+            <input type="email" id="adminCheckinIdentifier" placeholder="E-postadresse"
+                   autocomplete="off" required>
+            <button type="submit" id="adminCheckinSubmit">Trigger innsjekk</button>
+          </form>
+          <div id="adminCheckinMessage" class="auth-error" hidden></div>
+        </div>
       </main>
     </div>
 

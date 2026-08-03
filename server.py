@@ -1180,6 +1180,8 @@ class Handler(BaseHTTPRequestHandler):
             with _get_conversation_lock(user_id):
                 save_conversation(user_id, [])
             self._send_json({"ok": True})
+        elif path == "/api/admin/checkin":
+            self._handle_admin_checkin()
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -1575,6 +1577,34 @@ class Handler(BaseHTTPRequestHandler):
 
         result_days = {date_str: notes[date_str] for date_str in by_date if date_str in notes}
         self._send_json({"days": result_days})
+
+    def _handle_admin_checkin(self):
+        admin_id = self._require_admin()
+        if not admin_id:
+            return
+
+        body = self._read_json_body()
+        identifier = normalize_identifier(body.get("identifier"))
+        if not identifier:
+            self._send_json({"error": "Ugyldig e-postadresse."}, 400)
+            return
+
+        with _users_lock:
+            users = load_users()
+            user = find_user(users, identifier)
+        if not user:
+            self._send_json({"error": "Fant ingen bruker med denne e-postadressen."}, 404)
+            return
+
+        reply = perform_checkin(user["id"])
+        if reply is None:
+            self._send_json({"error": "Klarte ikke å generere en innsjekk akkurat nå."}, 500)
+            return
+
+        # Deliberately not returning the reply text itself — the admin
+        # dashboard only ever shows aggregate counts, never conversation
+        # content, and that includes content this same endpoint just wrote.
+        self._send_json({"ok": True})
 
     # ---------- chat endpoints ----------
 

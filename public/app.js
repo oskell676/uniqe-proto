@@ -99,6 +99,10 @@ const statMessages7d = document.getElementById("statMessages7d");
 const statFixedCost = document.getElementById("statFixedCost");
 const statVariableCost = document.getElementById("statVariableCost");
 const statEstCost = document.getElementById("statEstCost");
+const adminCheckinForm = document.getElementById("adminCheckinForm");
+const adminCheckinIdentifier = document.getElementById("adminCheckinIdentifier");
+const adminCheckinSubmit = document.getElementById("adminCheckinSubmit");
+const adminCheckinMessage = document.getElementById("adminCheckinMessage");
 
 let authMode = "login"; // or "signup"
 let currentUser = null;
@@ -701,6 +705,9 @@ function showAdminView() {
   settingsView.hidden = true;
   calendarView.hidden = true;
   adminView.hidden = false;
+  adminCheckinForm.reset();
+  adminCheckinMessage.hidden = true;
+  adminCheckinMessage.classList.remove("auth-success");
   loadAdminStats();
 }
 
@@ -713,6 +720,38 @@ adminBtn.addEventListener("click", showAdminView);
 closeAdminBtn.addEventListener("click", hideAdminView);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !adminView.hidden) hideAdminView();
+});
+
+adminCheckinForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const identifier = adminCheckinIdentifier.value.trim();
+  adminCheckinMessage.hidden = true;
+  adminCheckinMessage.classList.remove("auth-success");
+  adminCheckinSubmit.disabled = true;
+
+  try {
+    const res = await fetch("/api/admin/checkin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ identifier }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      adminCheckinMessage.textContent = data.error || "Noe gikk galt.";
+      adminCheckinMessage.hidden = false;
+      return;
+    }
+    adminCheckinMessage.textContent = `Innsjekk sendt til ${identifier}.`;
+    adminCheckinMessage.classList.add("auth-success");
+    adminCheckinMessage.hidden = false;
+    adminCheckinForm.reset();
+  } catch (err) {
+    adminCheckinMessage.textContent = "Klarte ikke å nå serveren.";
+    adminCheckinMessage.hidden = false;
+  } finally {
+    adminCheckinSubmit.disabled = false;
+  }
 });
 
 // ---------- service worker + push notifications ----------
