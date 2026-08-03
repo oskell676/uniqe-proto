@@ -44,6 +44,7 @@ PUBLIC_DIR = ROOT / "public"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
 DAYNOTES_DIR = DATA_DIR / "daynotes"
+SUMMARIES_DIR = DATA_DIR / "summaries"
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 CHECKIN_SCHEDULE_FILE = DATA_DIR / "checkin_schedule.json"
@@ -51,7 +52,8 @@ HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse pr
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
 MODEL = "claude-sonnet-5"
-MAX_HISTORY_TURNS_SENT = 30  # how many past messages to feed back to the model
+MAX_HISTORY_TURNS_SENT = 30  # how many recent messages to feed back to the model in full
+SUMMARY_REFRESH_INTERVAL = 20  # regenerate the rolling summary every N newly-aged-out messages
 SESSION_COOKIE_NAME = "uniqe_session"
 PBKDF2_ITERATIONS = 100_000
 EMAIL_CODE_TTL = 15 * 60  # seconds a verification code stays valid
@@ -119,6 +121,7 @@ CHECKIN_INSTRUCTION = (
 
 _conversation_lock = threading.Lock()
 _daynotes_lock = threading.Lock()
+_summaries_lock = threading.Lock()
 _schedule_lock = threading.Lock()
 _users_lock = threading.Lock()
 _sessions_lock = threading.Lock()
@@ -444,12 +447,33 @@ def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PR
             "før du starter serveren."
         )
 
+    # Prompt caching: the system prompt is identical across most calls (same
+    # text, same API key), so it's always worth marking as cacheable. The
+    # message history is a growing, mostly-repeated prefix within a single
+    # conversation — marking the second-to-last message as the cache
+    # boundary means only the newest turn is paid at full price on
+    # consecutive calls, while everything before it can be served from cache.
+    system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+    cached_messages = api_messages
+    if len(api_messages) > 1:
+        cached_messages = list(api_messages)
+        boundary = cached_messages[-2]
+        cached_messages[-2] = {
+            "role": boundary["role"],
+            "content": [{
+                "type": "text",
+                "text": boundary["content"],
+                "cache_control": {"type": "ephemeral"},
+            }],
+        }
+
     body = json.dumps({
         "model": MODEL,
         "max_tokens": max_tokens,
-        "system": system,
+        "system": system_blocks,
         "output_config": {"effort": effort},
-        "messages": api_messages,
+        "messages": cached_messages,
     })
 
     conn = http.client.HTTPSConnection("api.anthropic.com", timeout=60)
@@ -492,6 +516,119 @@ def to_api_messages(stored):
     """Convert stored history into the {role, content} shape the API expects."""
     trimmed = stored[-MAX_HISTORY_TURNS_SENT:]
     return [{"role": m["role"], "content": m["content"]} for m in trimmed]
+
+
+# ---------- rolling conversation summary (per user) ----------
+# Messages older than MAX_HISTORY_TURNS_SENT are never sent to the model at
+# all today — they're simply dropped, which is the cheapest possible option
+# but means UNIQE's memory of a long-running relationship is capped at the
+# last ~30 messages. A rolling summary folded into the system prompt gives it
+# real long-term memory for a small, bounded cost: regenerated only once
+# every SUMMARY_REFRESH_INTERVAL newly-aged-out messages (not on every
+# chat turn), and each regeneration only reads the new delta plus the
+# previous summary — never the whole history again.
+
+SUMMARY_SYSTEM_PROMPT = """\
+Du oppsummerer tidligere deler av en privat samtale mellom en bruker og \
+AI-følgesvennen deres, UNIQE, slik at UNIQE kan huske dem videre etter at den \
+eldste delen av samtalen ikke lenger sendes i sin helhet. Sammendraget vises \
+aldri til noen andre enn UNIQE selv, i en senere samtale.
+
+Skriv et kort, varmt sammendrag (maks 150 ord) av hvem brukeren er og hva \
+dere har snakket om — det UNIQE bør huske videre: navn, viktige hendelser, \
+bekymringer, gode nyheter, gjentakende temaer. Skriv det som notater til deg \
+selv, ikke som en rapport til brukeren.
+"""
+
+SUMMARY_INSTRUCTION_NEW = (
+    "[Instruks til deg selv, ikke synlig for brukeren: Lag et sammendrag av "
+    "samtalen over, som beskrevet i systeminstruksen.]"
+)
+
+SUMMARY_INSTRUCTION_UPDATE = (
+    "[Instruks til deg selv, ikke synlig for brukeren: Du har fra før dette "
+    "sammendraget av tidligere deler av samtalen:\n\n{prev}\n\nOppdater "
+    "sammendraget slik at det også dekker meldingene over (nyere deler som "
+    "ikke var med i forrige sammendrag). Hold det fortsatt kort og varmt.]"
+)
+
+
+def summary_path(user_id):
+    return SUMMARIES_DIR / f"{user_id}.json"
+
+
+def load_conversation_summary(user_id):
+    path = summary_path(user_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_conversation_summary(user_id, entry):
+    path = summary_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def generate_conversation_summary(delta_messages, previous_summary):
+    api_messages = to_api_messages(delta_messages)
+    instruction = (
+        SUMMARY_INSTRUCTION_UPDATE.format(prev=previous_summary)
+        if previous_summary
+        else SUMMARY_INSTRUCTION_NEW
+    )
+    api_messages.append({"role": "user", "content": instruction})
+    try:
+        reply = call_claude(api_messages, effort="low", max_tokens=250, system=SUMMARY_SYSTEM_PROMPT)
+    except RuntimeError as exc:
+        print(f"⚠️  Kunne ikke oppdatere samtalesammendrag: {exc}", flush=True)
+        return None
+    return reply.strip()
+
+
+def get_or_refresh_summary(user_id, stored):
+    """Best-effort: returns the cached summary text, refreshing it first if
+    enough new history has aged out since the last refresh. Never raises —
+    a missing summary must never break the chat itself."""
+    older = stored[:-MAX_HISTORY_TURNS_SENT]
+    if not older:
+        return None
+
+    with _summaries_lock:
+        entry = load_conversation_summary(user_id)
+    covered = entry.get("covered_count", 0) if entry else 0
+    previous_summary = entry.get("summary") if entry else None
+
+    if entry and len(older) - covered < SUMMARY_REFRESH_INTERVAL:
+        return previous_summary
+
+    delta_messages = older[covered:]
+    if not delta_messages:
+        return previous_summary
+
+    new_summary = generate_conversation_summary(delta_messages, previous_summary)
+    if new_summary is None:
+        return previous_summary
+
+    with _summaries_lock:
+        save_conversation_summary(user_id, {"summary": new_summary, "covered_count": len(older)})
+    return new_summary
+
+
+def build_chat_system_prompt(user_id, stored):
+    if len(stored) <= MAX_HISTORY_TURNS_SENT:
+        return SYSTEM_PROMPT
+    summary = get_or_refresh_summary(user_id, stored)
+    if not summary:
+        return SYSTEM_PROMPT
+    return (
+        SYSTEM_PROMPT
+        + "\n\nOppsummering av tidligere deler av samtalen med denne "
+        "brukeren (eldre enn meldingene du ser under):\n" + summary
+    )
 
 
 DAYNOTE_SYSTEM_PROMPT = """\
@@ -549,11 +686,12 @@ def perform_checkin(user_id):
     callers must treat this as best-effort."""
     with _conversation_lock:
         stored = load_conversation(user_id)
+        system_prompt = build_chat_system_prompt(user_id, stored)
         api_messages = to_api_messages(stored)
         api_messages.append({"role": "user", "content": CHECKIN_INSTRUCTION})
 
         try:
-            reply = call_claude(api_messages, effort="low", max_tokens=400)
+            reply = call_claude(api_messages, effort="low", max_tokens=400, system=system_prompt)
         except RuntimeError as exc:
             print(f"⚠️  Innsjekk feilet for {user_id}: {exc}", flush=True)
             return None
@@ -1241,9 +1379,10 @@ class Handler(BaseHTTPRequestHandler):
         with _conversation_lock:
             stored = load_conversation(user_id)
             stored.append({"role": "user", "content": user_text, "ts": time.time()})
+            system_prompt = build_chat_system_prompt(user_id, stored)
 
             try:
-                reply = call_claude(to_api_messages(stored))
+                reply = call_claude(to_api_messages(stored), system=system_prompt)
             except RuntimeError as exc:
                 self._send_json({"error": str(exc)}, 500)
                 return
