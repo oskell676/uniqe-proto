@@ -39,6 +39,11 @@ self.addEventListener("notificationclick", (event) => {
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
         if (client.url.includes(self.location.origin) && "focus" in client) {
+          // Focusing an already-open window does NOT reload it, so the
+          // check-in that was just delivered would otherwise never appear —
+          // it's already saved server-side, just never fetched into this
+          // still-open page. Tell the page to refresh its chat itself.
+          client.postMessage({ type: "checkin-opened" });
           return client.focus();
         }
       }

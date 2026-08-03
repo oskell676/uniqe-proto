@@ -84,6 +84,20 @@ const calendarDetailNote = document.getElementById("calendarDetailNote");
 const calendarDetailPositive = document.getElementById("calendarDetailPositive");
 const calendarLoading = document.getElementById("calendarLoading");
 
+const adminBtn = document.getElementById("adminBtn");
+const adminView = document.getElementById("adminView");
+const closeAdminBtn = document.getElementById("closeAdminBtn");
+const adminLoading = document.getElementById("adminLoading");
+const adminError = document.getElementById("adminError");
+const statTotalUsers = document.getElementById("statTotalUsers");
+const statNew7d = document.getElementById("statNew7d");
+const statActive24h = document.getElementById("statActive24h");
+const statActive7d = document.getElementById("statActive7d");
+const statPushEnabled = document.getElementById("statPushEnabled");
+const statTotalMessages = document.getElementById("statTotalMessages");
+const statMessages7d = document.getElementById("statMessages7d");
+const statEstCost = document.getElementById("statEstCost");
+
 let authMode = "login"; // or "signup"
 let currentUser = null;
 let pendingIdentifier = null;
@@ -116,6 +130,7 @@ function showAuthView() {
   chatView.hidden = true;
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   hideAllAuthCards();
   authCard.hidden = false;
   pendingIdentifier = null;
@@ -131,6 +146,7 @@ function showVerifyView(identifier) {
   chatView.hidden = true;
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   hideAllAuthCards();
   verifyCard.hidden = false;
   verifyCode.focus();
@@ -141,6 +157,7 @@ function showForgotView() {
   chatView.hidden = true;
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   hideAllAuthCards();
   forgotCard.hidden = false;
   forgotForm.reset();
@@ -154,6 +171,7 @@ function showResetView() {
   chatView.hidden = true;
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   hideAllAuthCards();
   resetCard.hidden = false;
   resetMessage.hidden = true;
@@ -167,6 +185,8 @@ function showChatView(user) {
   chatView.hidden = false;
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
+  adminBtn.hidden = !user.is_admin;
   userIndicator.textContent = user.identifier;
   chatEl.innerHTML = "";
   const empty = document.createElement("div");
@@ -448,12 +468,14 @@ function showSettingsView() {
   showSettingsFolderList();
   chatView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   settingsView.hidden = false;
 }
 
 function hideSettingsView() {
   settingsView.hidden = true;
   calendarView.hidden = true;
+  adminView.hidden = true;
   chatView.hidden = false;
 }
 
@@ -606,12 +628,14 @@ function showCalendarView() {
   calendarMonth = now.getMonth() + 1;
   chatView.hidden = true;
   settingsView.hidden = true;
+  adminView.hidden = true;
   calendarView.hidden = false;
   loadCalendarMonth();
 }
 
 function hideCalendarView() {
   calendarView.hidden = true;
+  adminView.hidden = true;
   chatView.hidden = false;
 }
 
@@ -629,6 +653,63 @@ calendarBtn.addEventListener("click", showCalendarView);
 closeCalendarBtn.addEventListener("click", hideCalendarView);
 calendarPrevBtn.addEventListener("click", () => shiftCalendarMonth(-1));
 calendarNextBtn.addEventListener("click", () => shiftCalendarMonth(1));
+
+// ---------- admin dashboard ----------
+
+function formatNumber(n) {
+  return new Intl.NumberFormat("nb-NO").format(n);
+}
+
+async function loadAdminStats() {
+  adminLoading.hidden = false;
+  adminError.hidden = true;
+  try {
+    const res = await fetch("/api/admin/stats", { credentials: "same-origin" });
+    if (res.status === 401) {
+      showAuthView();
+      return;
+    }
+    if (!res.ok) {
+      adminError.textContent = "Fikk ikke hentet tallene.";
+      adminError.hidden = false;
+      return;
+    }
+    const data = await res.json();
+    statTotalUsers.textContent = formatNumber(data.total_users);
+    statNew7d.textContent = formatNumber(data.new_signups_7d);
+    statActive24h.textContent = formatNumber(data.active_users_24h);
+    statActive7d.textContent = formatNumber(data.active_users_7d);
+    statPushEnabled.textContent = formatNumber(data.push_enabled);
+    statTotalMessages.textContent = formatNumber(data.total_messages);
+    statMessages7d.textContent = formatNumber(data.messages_7d);
+    statEstCost.textContent = `${formatNumber(Math.round(data.estimated_monthly_ai_cost_kr))} kr`;
+  } catch (err) {
+    adminError.textContent = "Klarte ikke å nå serveren.";
+    adminError.hidden = false;
+  } finally {
+    adminLoading.hidden = true;
+  }
+}
+
+function showAdminView() {
+  if (!currentUser) return;
+  chatView.hidden = true;
+  settingsView.hidden = true;
+  calendarView.hidden = true;
+  adminView.hidden = false;
+  loadAdminStats();
+}
+
+function hideAdminView() {
+  adminView.hidden = true;
+  chatView.hidden = false;
+}
+
+adminBtn.addEventListener("click", showAdminView);
+closeAdminBtn.addEventListener("click", hideAdminView);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !adminView.hidden) hideAdminView();
+});
 
 // ---------- service worker + push notifications ----------
 
@@ -650,6 +731,18 @@ async function registerServiceWorker() {
     console.warn("Kunne ikke registrere service worker:", err);
     return null;
   }
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    // The service worker sends this when a check-in notification is tapped
+    // while the app is already open in the background — focusing a window
+    // doesn't reload it, so without this the new message would never
+    // actually appear even though it's already saved server-side.
+    if (event.data && event.data.type === "checkin-opened" && currentUser) {
+      showChatView(currentUser);
+    }
+  });
 }
 
 async function enableNotifications() {

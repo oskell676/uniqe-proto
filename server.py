@@ -40,6 +40,33 @@ except ImportError:
     Vapid02 = None
 
 ROOT = Path(__file__).resolve().parent
+
+
+def load_dotenv():
+    """Tiny .env loader — no pip dependency needed for the base app.
+    Multi-line secrets (e.g. VAPID_PRIVATE_KEY's PEM) are stored on one line
+    with literal \\n escapes and unescaped back into real newlines here.
+    Called immediately below, before any other module-level os.environ.get()
+    reads — a config value that only exists in .env (not a real exported
+    shell/Fly env var) must already be in os.environ by the time constants
+    like DATA_DIR, VAPID_PRIVATE_KEY, or ADMIN_EMAILS are computed, since
+    those run once at import time, not lazily per-request."""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'").replace("\\n", "\n")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
+
 PUBLIC_DIR = ROOT / "public"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
@@ -76,6 +103,13 @@ CHECKIN_WINDOWS = [
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")  # PEM string
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")  # urlsafe-base64 raw point, sent to the browser
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:main@uniqe-no.com")
+
+# Comma-separated allowlist of identifiers that can see the admin dashboard
+# (aggregate counts only — never conversation content). Empty by default,
+# so the dashboard is fully disabled unless explicitly configured.
+ADMIN_EMAILS = {
+    e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()
+}
 
 # pywebpush's Vapid.from_string() only accepts a bare base64 key or a file
 # path — fed a full PEM block, it strips '\n' and tries to base64-decode the
@@ -243,6 +277,7 @@ def public_user(user):
         "id": user["id"],
         "identifier": user["identifier"],
         "created_at": user.get("created_at"),
+        "is_admin": user["identifier"] in ADMIN_EMAILS,
     }
 
 
@@ -818,6 +853,61 @@ def checkin_scheduler_loop():
         time.sleep(CHECKIN_POLL_INTERVAL)
 
 
+# ---------- admin dashboard ----------
+# Aggregate counts only — never conversation content. Gated behind
+# ADMIN_EMAILS so it's fully disabled unless explicitly configured.
+
+EST_KR_PER_MESSAGE = 0.071  # rough blended Sonnet 5 cost per chat message, from the earlier cost model
+EST_KR_PER_USER_CHECKINS = 2.5  # flat monthly cost of the twice-daily automated check-ins
+
+
+def compute_admin_stats():
+    with _users_lock:
+        users = load_users()
+
+    now = time.time()
+    day_ago = now - 24 * 60 * 60
+    week_ago = now - 7 * 24 * 60 * 60
+    month_ago = now - 30 * 24 * 60 * 60
+
+    total_messages = 0
+    messages_7d = 0
+    active_24h = set()
+    active_7d = set()
+
+    for u in users:
+        with _get_conversation_lock(u["id"]):
+            msgs = load_conversation(u["id"])
+        total_messages += len(msgs)
+        for m in msgs:
+            ts = m.get("ts", 0)
+            is_user_msg = m.get("role") == "user"
+            if ts >= week_ago:
+                messages_7d += 1
+                if is_user_msg:
+                    active_7d.add(u["id"])
+                    if ts >= day_ago:
+                        active_24h.add(u["id"])
+
+    projected_monthly_messages = messages_7d / 7 * 30
+    estimated_monthly_ai_cost_kr = (
+        projected_monthly_messages * EST_KR_PER_MESSAGE
+        + len(users) * EST_KR_PER_USER_CHECKINS
+    )
+
+    return {
+        "total_users": len(users),
+        "new_signups_7d": sum(1 for u in users if u.get("created_at", 0) >= week_ago),
+        "new_signups_30d": sum(1 for u in users if u.get("created_at", 0) >= month_ago),
+        "push_enabled": sum(1 for u in users if u.get("push_subscriptions")),
+        "active_users_24h": len(active_24h),
+        "active_users_7d": len(active_7d),
+        "total_messages": total_messages,
+        "messages_7d": messages_7d,
+        "estimated_monthly_ai_cost_kr": round(estimated_monthly_ai_cost_kr, 1),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "UNIQE/0.2"
 
@@ -890,6 +980,20 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return user_id
 
+    def _require_admin(self):
+        """Returns the authenticated user_id if it's on the ADMIN_EMAILS
+        allowlist, or sends 401/403 and returns None."""
+        user_id = self._require_auth()
+        if not user_id:
+            return None
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+        if not user or user["identifier"] not in ADMIN_EMAILS:
+            self._send_json({"error": "Ikke tilgang."}, 403)
+            return None
+        return user_id
+
     # ---------- routing ----------
 
     def do_HEAD(self):
@@ -951,6 +1055,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"messages": messages})
         elif path == "/api/calendar":
             self._handle_calendar()
+        elif path == "/api/admin/stats":
+            user_id = self._require_admin()
+            if not user_id:
+                return
+            self._send_json(compute_admin_stats())
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -1430,26 +1539,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"reply": reply, "proactive": True})
 
 
-def load_dotenv():
-    """Tiny .env loader — no pip dependency needed for the base app.
-    Multi-line secrets (e.g. VAPID_PRIVATE_KEY's PEM) are stored on one line
-    with literal \\n escapes and unescaped back into real newlines here."""
-    env_path = ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'").replace("\\n", "\n")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
 def main():
-    load_dotenv()
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(
             "⚠️  ANTHROPIC_API_KEY er ikke satt. Chatten vil feile til du legger "

@@ -375,6 +375,51 @@ body {
   padding: 20px 0;
 }
 
+/* ---------- admin dashboard ---------- */
+
+.admin-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  max-width: 520px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.stat-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.stat-value {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 1.6rem;
+  color: var(--amber);
+}
+
+.admin-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
 .modal-label {
   font-size: 0.68rem;
   letter-spacing: 0.06em;

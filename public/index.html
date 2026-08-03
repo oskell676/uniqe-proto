@@ -104,6 +104,7 @@
           <span id="userIndicator" class="user-indicator"></span>
           <button id="checkinBtn" class="ghost-btn">☀️ Simuler innsjekk</button>
           <button id="calendarBtn" class="text-btn" title="Kalender">Kalender</button>
+          <button id="adminBtn" class="text-btn" title="Admin" hidden>Admin</button>
           <button id="settingsBtn" class="text-btn" title="Innstillinger">Innstillinger</button>
           <button id="resetBtn" class="text-btn" title="Slett samtalen og start på nytt">Nullstill</button>
           <button id="logoutBtn" class="text-btn">Logg ut</button>
@@ -233,6 +234,55 @@
         </div>
 
         <div class="calendar-loading" id="calendarLoading" hidden>Henter kalenderen…</div>
+      </main>
+    </div>
+
+    <div id="adminView" class="chat-view" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span> UNIQE <span class="tag">· admin</span></div>
+        <div class="actions">
+          <button id="closeAdminBtn" class="text-btn">← Tilbake</button>
+        </div>
+      </header>
+
+      <main class="admin-content">
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="stat-label">Brukere totalt</div>
+            <div class="stat-value" id="statTotalUsers">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Nye siste 7 dager</div>
+            <div class="stat-value" id="statNew7d">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Aktive siste 24t</div>
+            <div class="stat-value" id="statActive24h">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Aktive siste 7 dager</div>
+            <div class="stat-value" id="statActive7d">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Varsler aktivert</div>
+            <div class="stat-value" id="statPushEnabled">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Meldinger totalt</div>
+            <div class="stat-value" id="statTotalMessages">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Meldinger siste 7 dager</div>
+            <div class="stat-value" id="statMessages7d">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Estimert AI-kostnad/mnd</div>
+            <div class="stat-value" id="statEstCost">–</div>
+          </div>
+        </div>
+        <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her.</p>
+        <div class="calendar-loading" id="adminLoading" hidden>Henter tall…</div>
+        <div class="calendar-loading" id="adminError" hidden></div>
       </main>
     </div>
 
