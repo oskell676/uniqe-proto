@@ -119,7 +119,27 @@ CHECKIN_INSTRUCTION = (
     "gjort noe for å fortjene den. Hold det kort — én til tre setninger.]"
 )
 
-_conversation_lock = threading.Lock()
+_conversation_locks_meta_lock = threading.Lock()
+_conversation_locks = {}  # user_id -> threading.Lock(), created lazily
+
+
+def _get_conversation_lock(user_id):
+    """Return the per-user lock guarding that user's conversation.json.
+
+    Held across the Claude API call (same as before), but scoped per user so
+    one user's slow response doesn't block another user's chat request or the
+    check-in scheduler. Dict access is itself guarded by a small meta-lock
+    since creating a new entry is a check-then-set that isn't safe to leave
+    unsynchronized.
+    """
+    with _conversation_locks_meta_lock:
+        lock = _conversation_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _conversation_locks[user_id] = lock
+        return lock
+
+
 _daynotes_lock = threading.Lock()
 _summaries_lock = threading.Lock()
 _schedule_lock = threading.Lock()
@@ -684,7 +704,7 @@ def perform_checkin(user_id):
     notification for it. Shared by the manual "Simuler innsjekk" button and
     the automated scheduler. Returns the reply text, or None on failure —
     callers must treat this as best-effort."""
-    with _conversation_lock:
+    with _get_conversation_lock(user_id):
         stored = load_conversation(user_id)
         system_prompt = build_chat_system_prompt(user_id, stored)
         api_messages = to_api_messages(stored)
@@ -926,7 +946,7 @@ class Handler(BaseHTTPRequestHandler):
             user_id = self._require_auth()
             if not user_id:
                 return
-            with _conversation_lock:
+            with _get_conversation_lock(user_id):
                 messages = load_conversation(user_id)
             self._send_json({"messages": messages})
         elif path == "/api/calendar":
@@ -964,7 +984,7 @@ class Handler(BaseHTTPRequestHandler):
             user_id = self._require_auth()
             if not user_id:
                 return
-            with _conversation_lock:
+            with _get_conversation_lock(user_id):
                 save_conversation(user_id, [])
             self._send_json({"ok": True})
         else:
@@ -1328,7 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
             now = datetime.now(timezone.utc)
             year, month = now.year, now.month
 
-        with _conversation_lock:
+        with _get_conversation_lock(user_id):
             messages = load_conversation(user_id)
         by_date = {
             date_str: day_messages
@@ -1376,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Tom melding"}, 400)
             return
 
-        with _conversation_lock:
+        with _get_conversation_lock(user_id):
             stored = load_conversation(user_id)
             stored.append({"role": "user", "content": user_text, "ts": time.time()})
             system_prompt = build_chat_system_prompt(user_id, stored)
