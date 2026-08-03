@@ -87,6 +87,12 @@ KR_PER_1M_INPUT = 3.0 * NOK_PER_USD
 KR_PER_1M_OUTPUT = 15.0 * NOK_PER_USD
 KR_PER_1M_CACHE_READ = 0.3 * NOK_PER_USD
 KR_PER_1M_CACHE_WRITE = 3.75 * NOK_PER_USD
+
+# Fly.io fixed hosting cost estimate: shared-cpu-1x/256MB VM (~$2.02/mo at
+# Fly's published per-second rate) + 1GB volume (~$0.15/mo). This doesn't
+# change with usage, unlike the AI cost — update it if the VM/volume size
+# in fly.toml changes.
+FIXED_COST_KR_PER_MONTH = round((2.02 + 0.15) * NOK_PER_USD, 1)
 MAX_HISTORY_TURNS_SENT = 30  # how many recent messages to feed back to the model in full
 SUMMARY_REFRESH_INTERVAL = 20  # regenerate the rolling summary every N newly-aged-out messages
 SESSION_COOKIE_NAME = "uniqe_session"
@@ -968,7 +974,8 @@ def compute_admin_stats():
                     if ts >= day_ago:
                         active_24h.add(u["id"])
 
-    estimated_monthly_ai_cost_kr = compute_actual_ai_cost_kr(days=7)
+    fixed_cost_kr = FIXED_COST_KR_PER_MONTH
+    variable_cost_kr = compute_actual_ai_cost_kr(days=7)
 
     return {
         "total_users": len(users),
@@ -979,7 +986,9 @@ def compute_admin_stats():
         "active_users_7d": len(active_7d),
         "total_messages": total_messages,
         "messages_7d": messages_7d,
-        "estimated_monthly_ai_cost_kr": round(estimated_monthly_ai_cost_kr, 1),
+        "fixed_cost_kr": round(fixed_cost_kr, 1),
+        "variable_cost_kr": round(variable_cost_kr, 1),
+        "estimated_monthly_cost_kr": round(fixed_cost_kr + variable_cost_kr, 1),
     }
 
 

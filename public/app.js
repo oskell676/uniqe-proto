@@ -96,6 +96,8 @@ const statActive7d = document.getElementById("statActive7d");
 const statPushEnabled = document.getElementById("statPushEnabled");
 const statTotalMessages = document.getElementById("statTotalMessages");
 const statMessages7d = document.getElementById("statMessages7d");
+const statFixedCost = document.getElementById("statFixedCost");
+const statVariableCost = document.getElementById("statVariableCost");
 const statEstCost = document.getElementById("statEstCost");
 
 let authMode = "login"; // or "signup"
@@ -682,7 +684,9 @@ async function loadAdminStats() {
     statPushEnabled.textContent = formatNumber(data.push_enabled);
     statTotalMessages.textContent = formatNumber(data.total_messages);
     statMessages7d.textContent = formatNumber(data.messages_7d);
-    statEstCost.textContent = `${formatNumber(Math.round(data.estimated_monthly_ai_cost_kr))} kr`;
+    statFixedCost.textContent = `${formatNumber(Math.round(data.fixed_cost_kr))} kr`;
+    statVariableCost.textContent = `${formatNumber(Math.round(data.variable_cost_kr))} kr`;
+    statEstCost.textContent = `${formatNumber(Math.round(data.estimated_monthly_cost_kr))} kr`;
   } catch (err) {
     adminError.textContent = "Klarte ikke å nå serveren.";
     adminError.hidden = false;

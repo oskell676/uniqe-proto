@@ -393,6 +393,11 @@ body {
   margin-bottom: 20px;
 }
 
+.stat-card-wide {
+  grid-column: 1 / -1;
+}
+.stat-card-wide .stat-value { color: var(--teal); }
+
 .stat-card {
   background: var(--surface);
   border: 1px solid var(--border);

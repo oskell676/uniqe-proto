@@ -276,11 +276,19 @@
             <div class="stat-value" id="statMessages7d">–</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">Estimert AI-kostnad/mnd</div>
+            <div class="stat-label">Faste kostnader/mnd</div>
+            <div class="stat-value" id="statFixedCost">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Variable kostnader/mnd</div>
+            <div class="stat-value" id="statVariableCost">–</div>
+          </div>
+          <div class="stat-card stat-card-wide">
+            <div class="stat-label">Estimert totalkostnad/mnd</div>
             <div class="stat-value" id="statEstCost">–</div>
           </div>
         </div>
-        <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her.</p>
+        <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her. Faste kostnader er hosting (Fly.io); variable kostnader er reelt Claude API-forbruk siste 7 dager, projisert til en måned.</p>
         <div class="calendar-loading" id="adminLoading" hidden>Henter tall…</div>
         <div class="calendar-loading" id="adminError" hidden></div>
       </main>
