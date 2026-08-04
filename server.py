@@ -617,26 +617,48 @@ def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PR
         "messages": cached_messages,
     })
 
-    conn = http.client.HTTPSConnection("api.anthropic.com", timeout=60)
-    try:
-        conn.request(
-            "POST",
-            "/v1/messages",
-            body=body,
-            headers={
-                "content-type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-        )
-        resp = conn.getresponse()
-        raw = resp.read().decode("utf-8")
-    finally:
-        conn.close()
+    # Anthropic's API occasionally returns 529 (overloaded) or 429 (rate
+    # limited) under load — both transient. Retry with backoff instead of
+    # failing the user's message outright; if it's still failing after
+    # retries, stay in character with a warm fallback line rather than
+    # surfacing a raw technical error in the chat.
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        conn = http.client.HTTPSConnection("api.anthropic.com", timeout=60)
+        try:
+            conn.request(
+                "POST",
+                "/v1/messages",
+                body=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+        finally:
+            conn.close()
 
-    data = json.loads(raw) if raw else {}
+        data = json.loads(raw) if raw else {}
 
-    if resp.status != 200:
+        if resp.status == 200:
+            break
+
+        error_type = (data.get("error") or {}).get("type", "")
+        is_transient = resp.status == 529 or resp.status == 429 or error_type == "overloaded_error"
+
+        if is_transient and attempt < max_attempts - 1:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+
+        if is_transient:
+            return (
+                "(Jeg er litt opptatt akkurat nå og fikk ikke svart ordentlig. "
+                "Kan du prøve igjen om et lite øyeblikk?)"
+            )
+
         message = (data.get("error") or {}).get("message", "Ukjent feil fra Anthropic API")
         raise RuntimeError(f"Anthropic API-feil ({resp.status}): {message}")
 
