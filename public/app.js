@@ -1,13 +1,20 @@
 // ---------- element refs ----------
+const inviteGateView = document.getElementById("inviteGateView");
+const inviteGateForm = document.getElementById("inviteGateForm");
+const inviteGateInput = document.getElementById("inviteGateInput");
+const inviteGateSubmit = document.getElementById("inviteGateSubmit");
+const inviteGateError = document.getElementById("inviteGateError");
+
 const authView = document.getElementById("authView");
 const chatView = document.getElementById("chatView");
 const authForm = document.getElementById("authForm");
 const authIdentifier = document.getElementById("authIdentifier");
 const authPassword = document.getElementById("authPassword");
+const ageConfirmRow = document.getElementById("ageConfirmRow");
+const authAgeConfirm = document.getElementById("authAgeConfirm");
 const authSubmit = document.getElementById("authSubmit");
 const authError = document.getElementById("authError");
 const authTabs = document.querySelectorAll(".auth-tab");
-const userIndicator = document.getElementById("userIndicator");
 
 const authCard = document.getElementById("authCard");
 const verifyCard = document.getElementById("verifyCard");
@@ -39,6 +46,13 @@ const emptyStateEl = document.getElementById("emptyState");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("sendBtn");
+const attachBtn = document.getElementById("attachBtn");
+const imageInput = document.getElementById("imageInput");
+const imagePreviewRow = document.getElementById("imagePreviewRow");
+const imagePreviewThumb = document.getElementById("imagePreviewThumb");
+const removeImageBtn = document.getElementById("removeImageBtn");
+const menuBtn = document.getElementById("menuBtn");
+const menuDropdown = document.getElementById("menuDropdown");
 const checkinBtn = document.getElementById("checkinBtn");
 const resetBtn = document.getElementById("resetBtn");
 const logoutBtn = document.getElementById("logoutBtn");
@@ -58,6 +72,18 @@ const newPasswordInput = document.getElementById("newPassword");
 const confirmPasswordInput = document.getElementById("confirmPassword");
 const passwordSubmit = document.getElementById("passwordSubmit");
 const passwordMessage = document.getElementById("passwordMessage");
+
+const deleteAccountBtn = document.getElementById("deleteAccountBtn");
+const deleteAccountForm = document.getElementById("deleteAccountForm");
+const deleteAccountPassword = document.getElementById("deleteAccountPassword");
+const deleteAccountSubmit = document.getElementById("deleteAccountSubmit");
+const cancelDeleteAccountBtn = document.getElementById("cancelDeleteAccountBtn");
+const deleteAccountMessage = document.getElementById("deleteAccountMessage");
+
+const referralLinkInput = document.getElementById("referralLinkInput");
+const copyReferralBtn = document.getElementById("copyReferralBtn");
+const referralCopiedMessage = document.getElementById("referralCopiedMessage");
+const referralInvitedCount = document.getElementById("referralInvitedCount");
 
 const enableNotificationsBtn = document.getElementById("enableNotificationsBtn");
 const notificationsStatus = document.getElementById("notificationsStatus");
@@ -99,16 +125,36 @@ const statMessages7d = document.getElementById("statMessages7d");
 const statFixedCost = document.getElementById("statFixedCost");
 const statVariableCost = document.getElementById("statVariableCost");
 const statEstCost = document.getElementById("statEstCost");
+const statErrors24h = document.getElementById("statErrors24h");
+const statErrors7d = document.getElementById("statErrors7d");
+const statCrisis24h = document.getElementById("statCrisis24h");
+const statCrisis7d = document.getElementById("statCrisis7d");
 const adminCheckinForm = document.getElementById("adminCheckinForm");
 const adminCheckinIdentifier = document.getElementById("adminCheckinIdentifier");
 const adminCheckinSubmit = document.getElementById("adminCheckinSubmit");
 const adminCheckinMessage = document.getElementById("adminCheckinMessage");
+const errorList = document.getElementById("errorList");
+const errorListEmpty = document.getElementById("errorListEmpty");
+
+const INVITE_GATE_STORAGE_KEY = "uniqeInviteCode";
+const EXPECTED_INVITE_CODE = "uniqe2026";
+let verifiedInviteCode = "";
+try {
+  verifiedInviteCode = localStorage.getItem(INVITE_GATE_STORAGE_KEY) || "";
+} catch (err) {
+  verifiedInviteCode = "";
+}
+
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB, must match server.py's MAX_IMAGE_BYTES
+let pendingImageFile = null;
 
 let authMode = "login"; // or "signup"
 let currentUser = null;
 let pendingIdentifier = null;
 let deferredInstallPrompt = null;
 let resetToken = null;
+let pendingReferralCode = "";
 let calendarYear = null;
 let calendarMonth = null; // 1-12
 let calendarDays = {}; // date string -> {note, positive}
@@ -131,7 +177,20 @@ function hideAllAuthCards() {
   resetCard.hidden = true;
 }
 
+function showInviteGateView() {
+  inviteGateView.hidden = false;
+  authView.hidden = true;
+  chatView.hidden = true;
+  settingsView.hidden = true;
+  calendarView.hidden = true;
+  adminView.hidden = true;
+  inviteGateError.hidden = true;
+  inviteGateForm.reset();
+  inviteGateInput.focus();
+}
+
 function showAuthView() {
+  inviteGateView.hidden = true;
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
@@ -148,6 +207,7 @@ function showVerifyView(identifier) {
   verifyForm.reset();
   verifyError.hidden = true;
   verifyError.classList.remove("auth-success");
+  inviteGateView.hidden = true;
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
@@ -159,6 +219,7 @@ function showVerifyView(identifier) {
 }
 
 function showForgotView() {
+  inviteGateView.hidden = true;
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
@@ -173,6 +234,7 @@ function showForgotView() {
 }
 
 function showResetView() {
+  inviteGateView.hidden = true;
   authView.hidden = false;
   chatView.hidden = true;
   settingsView.hidden = true;
@@ -187,19 +249,19 @@ function showResetView() {
 
 function showChatView(user) {
   currentUser = user;
+  inviteGateView.hidden = true;
   authView.hidden = true;
   chatView.hidden = false;
   settingsView.hidden = true;
   calendarView.hidden = true;
   adminView.hidden = true;
   adminBtn.hidden = !user.is_admin;
-  userIndicator.textContent = user.identifier;
+  checkinBtn.hidden = !user.is_admin;
   chatEl.innerHTML = "";
   const empty = document.createElement("div");
   empty.className = "empty-state";
   empty.id = "emptyState";
-  empty.textContent =
-    "Dette er begynnelsen på samtalen. Skriv noe under, eller trykk «Simuler innsjekk» for å se hvordan det føles når UNIQE tar kontakt selv.";
+  empty.textContent = "Dette er begynnelsen på samtalen. Skriv noe under for å komme i gang.";
   chatEl.appendChild(empty);
   loadHistory();
 }
@@ -209,12 +271,33 @@ function setAuthMode(mode) {
   authTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.mode === mode));
   authSubmit.textContent = mode === "login" ? "Logg inn" : "Opprett bruker";
   authPassword.autocomplete = mode === "login" ? "current-password" : "new-password";
+  ageConfirmRow.hidden = mode !== "signup";
+  authAgeConfirm.required = mode === "signup";
+  if (mode === "login") authAgeConfirm.checked = false;
   authError.hidden = true;
   authError.classList.remove("auth-success");
 }
 
 authTabs.forEach((tab) => {
   tab.addEventListener("click", () => setAuthMode(tab.dataset.mode));
+});
+
+inviteGateForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const code = inviteGateInput.value.trim();
+  if (code.toLowerCase() !== EXPECTED_INVITE_CODE) {
+    inviteGateError.textContent = "Ugyldig invitasjonskode.";
+    inviteGateError.hidden = false;
+    return;
+  }
+  verifiedInviteCode = code;
+  try {
+    localStorage.setItem(INVITE_GATE_STORAGE_KEY, code);
+  } catch (err) {
+    // localStorage unavailable (e.g. private mode) — still proceed for this session
+  }
+  showAuthView();
+  setAuthMode("login");
 });
 
 authForm.addEventListener("submit", async (e) => {
@@ -229,7 +312,14 @@ authForm.addEventListener("submit", async (e) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ identifier, password, timezone: getUserTimezone() }),
+      body: JSON.stringify({
+        identifier,
+        password,
+        timezone: getUserTimezone(),
+        invite_code: verifiedInviteCode,
+        ref: authMode === "signup" ? pendingReferralCode : undefined,
+        age_confirmed: authMode === "signup" ? authAgeConfirm.checked : undefined,
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -242,6 +332,7 @@ authForm.addEventListener("submit", async (e) => {
       showVerifyView(data.identifier);
       return;
     }
+    pendingReferralCode = "";
     showChatView(data.user);
     if (data.show_install_prompt) openInstallModal();
   } catch (err) {
@@ -250,6 +341,32 @@ authForm.addEventListener("submit", async (e) => {
   } finally {
     authSubmit.disabled = false;
   }
+});
+
+function closeMenu() {
+  menuDropdown.hidden = true;
+  menuBtn.setAttribute("aria-expanded", "false");
+}
+
+menuBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const isOpen = !menuDropdown.hidden;
+  menuDropdown.hidden = isOpen;
+  menuBtn.setAttribute("aria-expanded", String(!isOpen));
+});
+
+menuDropdown.addEventListener("click", (e) => {
+  if (e.target.closest(".menu-item")) closeMenu();
+});
+
+document.addEventListener("click", (e) => {
+  if (!menuDropdown.hidden && !menuDropdown.contains(e.target) && e.target !== menuBtn) {
+    closeMenu();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !menuDropdown.hidden) closeMenu();
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -373,6 +490,15 @@ function extractResetToken() {
   return true;
 }
 
+function extractReferralCode() {
+  const params = new URLSearchParams(window.location.search);
+  const ref = params.get("ref");
+  if (!ref) return false;
+  pendingReferralCode = ref.trim();
+  window.history.replaceState({}, "", window.location.pathname);
+  return true;
+}
+
 resetForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const newPassword = resetNewPassword.value;
@@ -423,7 +549,35 @@ function formatJoinedDate(unixSeconds) {
   return date.toLocaleDateString("nb-NO", { year: "numeric", month: "long", day: "numeric" });
 }
 
-function updateNotificationsStatus() {
+// True inside the Capacitor iOS App Store wrapper, false in a regular
+// browser/PWA — that wrapper's WKWebView has no Web Push support at all, so
+// it needs the separate native-APNs path below instead of service workers.
+function isNativeApp() {
+  return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+}
+
+async function updateNotificationsStatus() {
+  if (isNativeApp()) {
+    enableNotificationsBtn.hidden = false;
+    let granted = false;
+    try {
+      const { PushNotifications } = window.Capacitor.Plugins;
+      granted = (await PushNotifications.checkPermissions()).receive === "granted";
+    } catch (err) {
+      granted = false;
+    }
+    if (granted) {
+      notificationsStatus.textContent = "Varsler er på for denne enheten.";
+      enableNotificationsBtn.textContent = "🔔 På";
+      enableNotificationsBtn.disabled = true;
+    } else {
+      notificationsStatus.textContent = "Få et varsel selv om UNIQE er lukket.";
+      enableNotificationsBtn.textContent = "🔔 Slå på";
+      enableNotificationsBtn.disabled = false;
+    }
+    return;
+  }
+
   if (!("Notification" in window)) {
     notificationsStatus.textContent = "Nettleseren din støtter ikke varsler.";
     enableNotificationsBtn.hidden = true;
@@ -450,6 +604,23 @@ function showSettingsFolder(name) {
   const targetId = "settingsFolder" + name.charAt(0).toUpperCase() + name.slice(1);
   settingsFolderList.hidden = true;
   settingsFolders.forEach((el) => { el.hidden = el.id !== targetId; });
+  if (name === "invite") loadReferralInfo();
+}
+
+async function loadReferralInfo() {
+  referralInvitedCount.textContent = "Henter…";
+  try {
+    const res = await fetch("/api/referral", { credentials: "same-origin" });
+    if (!res.ok) throw new Error("request failed");
+    const data = await res.json();
+    referralLinkInput.value = `${location.origin}/?ref=${data.code}`;
+    const count = data.invited_count || 0;
+    referralInvitedCount.textContent = count === 1
+      ? "1 person har blitt med via lenken din."
+      : `${count} personer har blitt med via lenken din.`;
+  } catch (err) {
+    referralInvitedCount.textContent = "Kunne ikke hente invitasjonslenken.";
+  }
 }
 
 folderRows.forEach((row) => {
@@ -468,6 +639,11 @@ function showSettingsView() {
   passwordForm.reset();
   passwordMessage.hidden = true;
   passwordMessage.classList.remove("auth-success");
+  deleteAccountForm.reset();
+  deleteAccountForm.hidden = true;
+  cancelDeleteAccountBtn.hidden = true;
+  deleteAccountMessage.hidden = true;
+  deleteAccountBtn.hidden = false;
   notificationsMessage.hidden = true;
   notificationsMessage.classList.remove("auth-success");
   updateNotificationsStatus();
@@ -534,6 +710,56 @@ passwordForm.addEventListener("submit", async (e) => {
     passwordMessage.hidden = false;
   } finally {
     passwordSubmit.disabled = false;
+  }
+});
+
+deleteAccountBtn.addEventListener("click", () => {
+  deleteAccountBtn.hidden = true;
+  deleteAccountForm.hidden = false;
+  cancelDeleteAccountBtn.hidden = false;
+  deleteAccountMessage.hidden = true;
+  deleteAccountPassword.focus();
+});
+
+cancelDeleteAccountBtn.addEventListener("click", () => {
+  deleteAccountForm.reset();
+  deleteAccountForm.hidden = true;
+  cancelDeleteAccountBtn.hidden = true;
+  deleteAccountMessage.hidden = true;
+  deleteAccountBtn.hidden = false;
+});
+
+deleteAccountForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const password = deleteAccountPassword.value;
+  deleteAccountMessage.hidden = true;
+  deleteAccountSubmit.disabled = true;
+
+  try {
+    const res = await fetch("/api/auth/delete-account", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json();
+    if (res.status === 401 && data.error === "Du må logge inn først.") {
+      showAuthView();
+      return;
+    }
+    if (!res.ok) {
+      deleteAccountMessage.textContent = data.error || "Noe gikk galt.";
+      deleteAccountMessage.hidden = false;
+      return;
+    }
+    currentUser = null;
+    showAuthView();
+    setAuthMode("login");
+  } catch (err) {
+    deleteAccountMessage.textContent = "Klarte ikke å nå serveren.";
+    deleteAccountMessage.hidden = false;
+  } finally {
+    deleteAccountSubmit.disabled = false;
   }
 });
 
@@ -666,6 +892,13 @@ function formatNumber(n) {
   return new Intl.NumberFormat("nb-NO").format(n);
 }
 
+function formatErrorTime(unixSeconds) {
+  const date = new Date(unixSeconds * 1000);
+  return date.toLocaleString("nb-NO", {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 async function loadAdminStats() {
   adminLoading.hidden = false;
   adminError.hidden = true;
@@ -691,11 +924,60 @@ async function loadAdminStats() {
     statFixedCost.textContent = `${formatNumber(Math.round(data.fixed_cost_kr))} kr`;
     statVariableCost.textContent = `${formatNumber(Math.round(data.variable_cost_kr))} kr`;
     statEstCost.textContent = `${formatNumber(Math.round(data.estimated_monthly_cost_kr))} kr`;
+    statErrors24h.textContent = formatNumber(data.errors_24h);
+    statErrors7d.textContent = formatNumber(data.errors_7d);
+    statCrisis24h.textContent = formatNumber(data.crisis_flags_24h);
+    statCrisis7d.textContent = formatNumber(data.crisis_flags_7d);
   } catch (err) {
     adminError.textContent = "Klarte ikke å nå serveren.";
     adminError.hidden = false;
   } finally {
     adminLoading.hidden = true;
+  }
+}
+
+async function loadRecentErrors() {
+  errorList.innerHTML = "";
+  errorListEmpty.hidden = true;
+  try {
+    const res = await fetch("/api/admin/errors", { credentials: "same-origin" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.errors.length) {
+      errorListEmpty.hidden = false;
+      return;
+    }
+    for (const err of data.errors) {
+      const row = document.createElement("div");
+      row.className = "error-row";
+
+      const meta = document.createElement("div");
+      meta.className = "error-row-meta";
+      const category = document.createElement("span");
+      category.className = "error-row-category";
+      category.textContent = err.category;
+      const time = document.createElement("span");
+      time.textContent = formatErrorTime(err.ts);
+      meta.appendChild(category);
+      meta.appendChild(time);
+      row.appendChild(meta);
+
+      const message = document.createElement("div");
+      message.className = "error-row-message";
+      message.textContent = err.message;
+      row.appendChild(message);
+
+      if (err.path) {
+        const path = document.createElement("div");
+        path.className = "error-row-path";
+        path.textContent = err.path;
+        row.appendChild(path);
+      }
+
+      errorList.appendChild(row);
+    }
+  } catch (err) {
+    // Best-effort — the stat cards above already show the error counts.
   }
 }
 
@@ -709,6 +991,7 @@ function showAdminView() {
   adminCheckinMessage.hidden = true;
   adminCheckinMessage.classList.remove("auth-success");
   loadAdminStats();
+  loadRecentErrors();
 }
 
 function hideAdminView() {
@@ -788,9 +1071,63 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+let nativePushListenersReady = false;
+
+function setupNativePushListeners() {
+  if (nativePushListenersReady) return;
+  nativePushListenersReady = true;
+  const { PushNotifications } = window.Capacitor.Plugins;
+
+  PushNotifications.addListener("registration", (token) => {
+    fetch("/api/push/apns-register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ token: token.value }),
+    }).catch(() => {});
+  });
+
+  PushNotifications.addListener("registrationError", (err) => {
+    console.warn("APNs-registrering feilet:", err);
+  });
+
+  // A tapped notification brings the app to the foreground but, like the
+  // service-worker "checkin-opened" message below, doesn't reload it on its
+  // own — without this the new check-in reply wouldn't appear until the
+  // user manually left and re-entered the chat.
+  PushNotifications.addListener("pushNotificationActionPerformed", () => {
+    if (currentUser) showChatView(currentUser);
+  });
+}
+
 async function enableNotifications() {
   notificationsMessage.hidden = true;
   notificationsMessage.classList.remove("auth-success");
+
+  if (isNativeApp()) {
+    enableNotificationsBtn.disabled = true;
+    try {
+      setupNativePushListeners();
+      const { PushNotifications } = window.Capacitor.Plugins;
+      const perm = await PushNotifications.requestPermissions();
+      if (perm.receive !== "granted") {
+        notificationsMessage.textContent = "Du må tillate varsler for at dette skal fungere.";
+        notificationsMessage.hidden = false;
+        return;
+      }
+      await PushNotifications.register();
+      notificationsMessage.textContent = "Varsler er slått på for denne enheten.";
+      notificationsMessage.classList.add("auth-success");
+      notificationsMessage.hidden = false;
+      await updateNotificationsStatus();
+    } catch (err) {
+      notificationsMessage.textContent = "Fikk ikke slått på varsler. Prøv igjen.";
+      notificationsMessage.hidden = false;
+    } finally {
+      enableNotificationsBtn.disabled = false;
+    }
+    return;
+  }
 
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
     notificationsMessage.textContent = "Nettleseren din støtter ikke push-varsler.";
@@ -878,6 +1215,22 @@ function closeInstallModal() {
 }
 
 installBtn.addEventListener("click", openInstallModal);
+
+copyReferralBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(referralLinkInput.value);
+  } catch (err) {
+    try {
+      referralLinkInput.select();
+      document.execCommand("copy");
+    } catch (fallbackErr) {
+      // Neither copy method worked — the link is still visible and
+      // selectable in the input for the user to copy manually.
+    }
+  }
+  referralCopiedMessage.hidden = false;
+  setTimeout(() => { referralCopiedMessage.hidden = true; }, 2000);
+});
 closeInstallBtn.addEventListener("click", closeInstallModal);
 installModal.addEventListener("click", (e) => {
   if (e.target === installModal) closeInstallModal();
@@ -904,7 +1257,33 @@ function hideEmptyState() {
   if (el) el.remove();
 }
 
-function renderMessage({ role, content, proactive }) {
+function renderCrisisCard() {
+  const card = document.createElement("div");
+  card.className = "crisis-card";
+
+  const title = document.createElement("div");
+  title.className = "crisis-card-title";
+  title.textContent = "🆘 Trenger du noen å snakke med nå?";
+  card.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "crisis-card-body";
+
+  const emergency = document.createElement("a");
+  emergency.href = "tel:113";
+  emergency.innerHTML = "<strong>113</strong> — akutt fare for liv og helse";
+  body.appendChild(emergency);
+
+  const helpline = document.createElement("a");
+  helpline.href = "tel:116123";
+  helpline.innerHTML = "<strong>116 123</strong> — Mental Helse Hjelpetelefon (døgnåpen, gratis)";
+  body.appendChild(helpline);
+
+  card.appendChild(body);
+  chatEl.appendChild(card);
+}
+
+function renderMessage({ role, content, proactive, image_id, imageSrcOverride, crisis_flag }) {
   hideEmptyState();
   const bubble = document.createElement("div");
   bubble.className = `msg ${role}`;
@@ -916,11 +1295,23 @@ function renderMessage({ role, content, proactive }) {
     bubble.appendChild(tag);
   }
 
-  const body = document.createElement("div");
-  body.innerHTML = escapeHtml(content);
-  bubble.appendChild(body);
+  if (image_id || imageSrcOverride) {
+    const img = document.createElement("img");
+    img.className = "msg-image";
+    img.src = imageSrcOverride || `/api/images/${image_id}`;
+    img.alt = "";
+    img.loading = "lazy";
+    bubble.appendChild(img);
+  }
+
+  if (content) {
+    const body = document.createElement("div");
+    body.innerHTML = escapeHtml(content);
+    bubble.appendChild(body);
+  }
 
   chatEl.appendChild(bubble);
+  if (crisis_flag) renderCrisisCard();
   chatEl.scrollTop = chatEl.scrollHeight;
   return bubble;
 }
@@ -970,8 +1361,29 @@ async function loadHistory() {
   }
 }
 
-async function sendMessage(text) {
-  renderMessage({ role: "user", content: text });
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function clearPendingImage() {
+  pendingImageFile = null;
+  imageInput.value = "";
+  imagePreviewRow.hidden = true;
+}
+
+async function sendMessage(text, imageFile) {
+  let imagePreviewUrl = null;
+  let imagePayload = null;
+  if (imageFile) {
+    imagePreviewUrl = URL.createObjectURL(imageFile);
+    imagePayload = { data: await fileToBase64(imageFile), mime_type: imageFile.type };
+  }
+  renderMessage({ role: "user", content: text, imageSrcOverride: imagePreviewUrl });
   setBusy(true);
   showTyping();
   try {
@@ -979,7 +1391,7 @@ async function sendMessage(text) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, image: imagePayload }),
     });
     if (res.status === 401) {
       hideTyping();
@@ -992,7 +1404,7 @@ async function sendMessage(text) {
       renderError(data.error || "Noe gikk galt.");
       return;
     }
-    renderMessage({ role: "assistant", content: data.reply });
+    renderMessage({ role: "assistant", content: data.reply, crisis_flag: data.crisis_flag });
   } catch (err) {
     hideTyping();
     renderError("Klarte ikke å nå serveren.");
@@ -1018,7 +1430,7 @@ async function simulateCheckin() {
       renderError(data.error || "Noe gikk galt.");
       return;
     }
-    renderMessage({ role: "assistant", content: data.reply, proactive: true });
+    renderMessage({ role: "assistant", content: data.reply, proactive: true, crisis_flag: data.crisis_flag });
   } catch (err) {
     hideTyping();
     renderError("Klarte ikke å nå serveren.");
@@ -1027,13 +1439,37 @@ async function simulateCheckin() {
   }
 }
 
+attachBtn.addEventListener("click", () => imageInput.click());
+
+imageInput.addEventListener("change", () => {
+  const file = imageInput.files[0];
+  if (!file) return;
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    renderError("Bildeformatet støttes ikke. Bruk JPEG, PNG, GIF eller WebP.");
+    imageInput.value = "";
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    renderError("Bildet er for stort (maks 5 MB).");
+    imageInput.value = "";
+    return;
+  }
+  pendingImageFile = file;
+  imagePreviewThumb.src = URL.createObjectURL(file);
+  imagePreviewRow.hidden = false;
+});
+
+removeImageBtn.addEventListener("click", clearPendingImage);
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !pendingImageFile) return;
+  const imageFile = pendingImageFile;
   input.value = "";
   input.style.height = "auto";
-  sendMessage(text);
+  clearPendingImage();
+  sendMessage(text, imageFile);
 });
 
 input.addEventListener("input", () => {
@@ -1059,22 +1495,60 @@ resetBtn.addEventListener("click", async () => {
 
 // ---------- bootstrap ----------
 
+function showAuthOrInviteGate() {
+  if (verifiedInviteCode.toLowerCase() === EXPECTED_INVITE_CODE) {
+    showAuthView();
+  } else {
+    showInviteGateView();
+  }
+}
+
+async function reregisterNativePushIfGranted() {
+  // Re-registering on every launch (not just the first "Slå på" tap) keeps
+  // the stored device token current — APNs can rotate it, and a stale token
+  // would otherwise silently stop check-ins from arriving.
+  if (!isNativeApp()) return;
+  try {
+    const { PushNotifications } = window.Capacitor.Plugins;
+    const perm = await PushNotifications.checkPermissions();
+    if (perm.receive === "granted") {
+      setupNativePushListeners();
+      await PushNotifications.register();
+    }
+  } catch (err) {
+    // best-effort — the Settings "Slå på" button remains the fallback
+  }
+}
+
 (async function init() {
   registerServiceWorker();
+  reregisterNativePushIfGranted();
 
   if (extractResetToken()) {
     showResetView();
     return;
+  }
+  const hasReferral = extractReferralCode();
+  if (hasReferral) {
+    verifiedInviteCode = EXPECTED_INVITE_CODE;
+    try {
+      localStorage.setItem(INVITE_GATE_STORAGE_KEY, EXPECTED_INVITE_CODE);
+    } catch (err) {
+      // localStorage unavailable (e.g. private mode) — still proceed for this session
+    }
   }
   try {
     const res = await fetch("/api/auth/me", { credentials: "same-origin" });
     if (res.ok) {
       const data = await res.json();
       showChatView(data.user);
-    } else {
+    } else if (hasReferral) {
       showAuthView();
+      setAuthMode("signup");
+    } else {
+      showAuthOrInviteGate();
     }
   } catch (err) {
-    showAuthView();
+    showAuthOrInviteGate();
   }
 })();

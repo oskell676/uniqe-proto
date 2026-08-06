@@ -3,3 +3,5 @@ data/
 __pycache__/
 .venv-test/
 .venv/
+.DS_Store
+UNIQE_kostnad_inntekt_modell.xlsx

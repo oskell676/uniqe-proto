@@ -2,8 +2,8 @@
 <html lang="no">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UNIQE — Prototype</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>UNIQE</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
@@ -15,6 +15,26 @@
 </head>
 <body>
   <div class="app">
+
+    <div id="inviteGateView" class="auth-view" hidden>
+      <div class="auth-card">
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <p class="auth-sub">UNIQE er foreløpig kun tilgjengelig via invitasjon. Skriv inn koden din for å fortsette.</p>
+
+        <form id="inviteGateForm" class="auth-form">
+          <input type="text" id="inviteGateInput" placeholder="Invitasjonskode"
+                 autocomplete="off" required>
+          <button type="submit" id="inviteGateSubmit">Fortsett</button>
+        </form>
+
+        <div id="inviteGateError" class="auth-error" hidden></div>
+      </div>
+      <div class="legal-links">
+        <a href="/juridisk#personvern" target="_blank" rel="noopener">Personvern</a>
+        <span>·</span>
+        <a href="/juridisk#vilkar" target="_blank" rel="noopener">Vilkår</a>
+      </div>
+    </div>
 
     <div id="authView" class="auth-view" hidden>
       <div class="auth-card" id="authCard">
@@ -31,6 +51,14 @@
                  autocomplete="email" required>
           <input type="password" id="authPassword" placeholder="Passord"
                  autocomplete="current-password" required minlength="6">
+          <label id="ageConfirmRow" class="checkbox-row" hidden>
+            <input type="checkbox" id="authAgeConfirm">
+            <span>
+              Jeg bekrefter at jeg er 16 år eller eldre, og godtar
+              <a href="/juridisk#vilkar" target="_blank" rel="noopener">vilkårene</a> og
+              <a href="/juridisk#personvern" target="_blank" rel="noopener">personvernerklæringen</a>.
+            </span>
+          </label>
           <button type="submit" id="authSubmit">Logg inn</button>
         </form>
 
@@ -95,37 +123,55 @@
 
         <div id="resetMessage" class="auth-error" hidden></div>
       </div>
+      <div class="legal-links">
+        <a href="/juridisk#personvern" target="_blank" rel="noopener">Personvern</a>
+        <span>·</span>
+        <a href="/juridisk#vilkar" target="_blank" rel="noopener">Vilkår</a>
+      </div>
     </div>
 
     <div id="chatView" class="chat-view" hidden>
       <header class="topbar">
-        <div class="brand"><span class="dot"></span> UNIQE <span class="tag">· prototype</span></div>
-        <div class="actions">
-          <span id="userIndicator" class="user-indicator"></span>
-          <button id="checkinBtn" class="ghost-btn">☀️ Simuler innsjekk</button>
-          <button id="calendarBtn" class="text-btn" title="Kalender">Kalender</button>
-          <button id="adminBtn" class="text-btn" title="Admin" hidden>Admin</button>
-          <button id="settingsBtn" class="text-btn" title="Innstillinger">Innstillinger</button>
-          <button id="resetBtn" class="text-btn" title="Slett samtalen og start på nytt">Nullstill</button>
-          <button id="logoutBtn" class="text-btn">Logg ut</button>
+        <div class="brand"><span class="dot"></span> UNIQE</div>
+        <div class="menu-wrap">
+          <button id="menuBtn" class="menu-toggle" aria-haspopup="true" aria-expanded="false" aria-label="Meny">☰</button>
+          <div id="menuDropdown" class="menu-dropdown" hidden>
+            <button id="checkinBtn" class="menu-item" hidden>☀️ Simuler innsjekk</button>
+            <button id="calendarBtn" class="menu-item">Kalender</button>
+            <button id="adminBtn" class="menu-item" hidden>Admin</button>
+            <button id="settingsBtn" class="menu-item">Innstillinger</button>
+            <button id="resetBtn" class="menu-item">Nullstill samtale</button>
+            <a href="/juridisk" target="_blank" rel="noopener" class="menu-item menu-item-link">Personvern og vilkår</a>
+            <div class="menu-divider"></div>
+            <button id="logoutBtn" class="menu-item menu-item-danger">Logg ut</button>
+          </div>
         </div>
       </header>
 
       <main id="chat" class="chat">
         <div class="empty-state" id="emptyState">
-          Dette er begynnelsen på samtalen. Skriv noe under, eller trykk «Simuler innsjekk» for å se hvordan det føles når UNIQE tar kontakt selv.
+          Dette er begynnelsen på samtalen. Skriv noe under for å komme i gang.
         </div>
       </main>
 
+      <div id="imagePreviewRow" class="image-preview-row" hidden>
+        <img id="imagePreviewThumb" class="image-preview-thumb" alt="">
+        <button type="button" id="removeImageBtn" class="image-preview-remove" aria-label="Fjern bilde">✕</button>
+      </div>
       <form id="composer" class="composer">
-        <textarea id="input" placeholder="Skriv noe…" rows="1"></textarea>
-        <button type="submit" id="sendBtn">Send</button>
+        <input type="file" id="imageInput" accept="image/jpeg,image/png,image/gif,image/webp" hidden>
+        <div class="composer-field">
+          <button type="button" id="attachBtn" class="attach-btn" title="Legg ved bilde" aria-label="Legg ved bilde">📎</button>
+          <textarea id="input" placeholder="Skriv noe…" rows="1"></textarea>
+          <button type="submit" id="sendBtn" class="send-btn" aria-label="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
       </form>
-
-      <footer class="disclaimer">
-        Dette er en tidlig prototype — ikke en erstatning for profesjonell hjelp.
-        Ved akutt fare, ring <strong>113</strong>. Mental Helse Hjelpetelefon: <strong>116 123</strong>.
-      </footer>
     </div>
 
     <div id="settingsView" class="chat-view" hidden>
@@ -150,6 +196,10 @@
             <span>Tillatelser</span>
             <span class="folder-row-hint">Varslinger og hjemskjerm <span class="chevron">›</span></span>
           </button>
+          <button type="button" class="folder-row" data-folder="invite">
+            <span>Inviter venner</span>
+            <span class="folder-row-hint">Del lenken din <span class="chevron">›</span></span>
+          </button>
         </div>
 
         <div id="settingsFolderAccount" class="settings-folder" hidden>
@@ -158,6 +208,24 @@
             <div class="modal-label">Konto</div>
             <div class="modal-value" id="settingsIdentifier"></div>
             <div class="modal-hint" id="settingsCreatedAt"></div>
+          </div>
+
+          <div class="modal-section danger-zone">
+            <div class="modal-label">Slett konto</div>
+            <p class="modal-hint">
+              Dette sletter kontoen din permanent, inkludert all samtalehistorikk,
+              kalendernotater og innstillinger. Dette kan ikke angres.
+            </p>
+            <button type="button" id="deleteAccountBtn" class="danger-btn">Slett kontoen min</button>
+
+            <form id="deleteAccountForm" class="auth-form" hidden>
+              <input type="password" id="deleteAccountPassword" placeholder="Bekreft med passordet ditt"
+                     autocomplete="current-password" required>
+              <button type="submit" id="deleteAccountSubmit" class="danger-btn">Bekreft sletting</button>
+            </form>
+            <button type="button" id="cancelDeleteAccountBtn" class="text-btn" hidden>Avbryt</button>
+
+            <div id="deleteAccountMessage" class="auth-error" hidden></div>
           </div>
         </div>
 
@@ -199,6 +267,23 @@
               </div>
               <button type="button" id="installBtn" class="ghost-btn">📲 Vis hvordan</button>
             </div>
+          </div>
+        </div>
+
+        <div id="settingsFolderInvite" class="settings-folder" hidden>
+          <button type="button" class="folder-back">← Innstillinger</button>
+          <div class="modal-section">
+            <div class="modal-label">Inviter venner</div>
+            <p class="modal-hint">
+              Del lenken din. Når noen oppretter bruker via den, hopper de rett forbi
+              invitasjonskoden.
+            </p>
+            <div class="referral-link-row">
+              <input type="text" id="referralLinkInput" readonly>
+              <button type="button" id="copyReferralBtn" class="ghost-btn">Kopier</button>
+            </div>
+            <div id="referralCopiedMessage" class="auth-success" hidden>Lenke kopiert!</div>
+            <div class="modal-hint" id="referralInvitedCount" style="margin-top:14px;"></div>
           </div>
         </div>
       </main>
@@ -287,8 +372,24 @@
             <div class="stat-label">Estimert totalkostnad/mnd</div>
             <div class="stat-value" id="statEstCost">–</div>
           </div>
+          <div class="stat-card">
+            <div class="stat-label">Feil siste 24t</div>
+            <div class="stat-value" id="statErrors24h">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Feil siste 7 dager</div>
+            <div class="stat-value" id="statErrors7d">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Krise-varsler siste 24t</div>
+            <div class="stat-value" id="statCrisis24h">–</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Krise-varsler siste 7 dager</div>
+            <div class="stat-value" id="statCrisis7d">–</div>
+          </div>
         </div>
-        <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her. Faste kostnader er hosting (Fly.io); variable kostnader er reelt Claude API-forbruk siste 7 dager, projisert til en måned.</p>
+        <p class="admin-hint">Kun aggregerte tall — ingen samtaleinnhold vises her. Faste kostnader er hosting (Fly.io); variable kostnader er reelt Claude API-forbruk siste 7 dager, projisert til en måned. Krise-varsler er antall ganger UNIQE selv har vurdert at en samtale tydet på akutt fare og vist ressurskort — kun et tall, aldri innhold.</p>
         <div class="calendar-loading" id="adminLoading" hidden>Henter tall…</div>
         <div class="calendar-loading" id="adminError" hidden></div>
 
@@ -300,6 +401,13 @@
             <button type="submit" id="adminCheckinSubmit">Trigger innsjekk</button>
           </form>
           <div id="adminCheckinMessage" class="auth-error" hidden></div>
+        </div>
+
+        <div class="modal-section">
+          <div class="modal-label">Nylige feil</div>
+          <p class="modal-hint" style="margin-bottom:12px;">Tekniske feilmeldinger — aldri samtaleinnhold.</p>
+          <div id="errorList" class="error-list"></div>
+          <div class="calendar-loading" id="errorListEmpty" hidden>Ingen feil registrert.</div>
         </div>
       </main>
     </div>

@@ -39,6 +39,7 @@ body {
 .auth-view {
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 24px;
@@ -98,7 +99,10 @@ body {
   border-radius: 10px;
   color: var(--text);
   font-family: inherit;
-  font-size: 0.92rem;
+  /* iOS Safari auto-zooms into any input with a computed font-size under
+     16px on focus, and can leave the page stuck zoomed in afterwards — so
+     this must never go below 1rem/16px. */
+  font-size: 1rem;
   padding: 11px 13px;
 }
 .auth-form input:focus {
@@ -118,6 +122,32 @@ body {
 }
 .auth-form button:disabled { opacity: 0.6; cursor: not-allowed; }
 
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  cursor: pointer;
+}
+.checkbox-row input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--amber);
+}
+.checkbox-row a { color: var(--teal); }
+
+.legal-links {
+  text-align: center;
+  margin-top: 16px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.legal-links a { color: var(--text-muted); text-decoration: none; }
+.legal-links a:hover { color: var(--text); }
+.legal-links span { margin: 0 6px; }
+
 .auth-error {
   margin-top: 14px;
   font-size: 0.82rem;
@@ -132,16 +162,6 @@ body {
   margin-top: 14px;
 }
 .verify-links .text-btn { padding: 4px 6px; font-size: 0.8rem; }
-
-.user-indicator {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  margin-right: 2px;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ---------- settings modal ---------- */
 
@@ -188,6 +208,29 @@ body {
 .modal-section { margin-bottom: 22px; }
 .modal-section:last-child { margin-bottom: 0; }
 
+.danger-zone {
+  border-top: 1px solid var(--border);
+  padding-top: 22px;
+}
+.danger-zone .modal-hint { margin: 6px 0 14px; line-height: 1.5; }
+button.danger-btn {
+  width: 100%;
+  margin-top: 0;
+  background: transparent;
+  border: 1px solid #C97A6B;
+  color: #C97A6B;
+  border-radius: 10px;
+  padding: 11px 0;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+button.danger-btn:hover { background: #C97A6B; color: var(--bg); }
+button.danger-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+#cancelDeleteAccountBtn { margin-top: 8px; }
+
 .settings-content {
   flex: 1;
   overflow-y: auto;
@@ -205,6 +248,24 @@ body {
   margin-bottom: 12px;
 }
 .permission-row:last-child { margin-bottom: 0; }
+
+.referral-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.referral-link-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.referral-link-row .ghost-btn { flex-shrink: 0; }
 
 /* ---------- settings folders ---------- */
 
@@ -425,6 +486,48 @@ body {
   line-height: 1.5;
 }
 
+.error-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.error-row {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid #C97A6B;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.error-row-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.error-row-category { color: #C97A6B; }
+
+.error-row-message {
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.error-row-path {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
 .modal-label {
   font-size: 0.68rem;
   letter-spacing: 0.06em;
@@ -460,13 +563,17 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px 16px;
-  padding: 16px 20px;
+  /* max() keeps the 16px fallback on regular browsers/PWA while pushing
+     content below the Dynamic Island on notched devices in the native app —
+     without it, taps on the menu button land in the island's touch-exclusion
+     zone and never reach the page. */
+  padding: max(16px, env(safe-area-inset-top)) 20px 16px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .brand {
   font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
-  font-size: 1.3rem;
+  font-size: 1.55rem;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -492,6 +599,63 @@ body {
   justify-content: flex-end;
   gap: 8px 10px;
 }
+
+.menu-wrap {
+  position: relative;
+}
+.menu-toggle {
+  width: 38px;
+  height: 38px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 9px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.menu-toggle:hover { border-color: var(--amber); color: var(--amber); }
+
+.menu-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 230px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+}
+.menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+.menu-item {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 10px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+}
+.menu-item:hover { background: var(--surface-2); }
+.menu-item-danger { color: #C97A6B; }
+.menu-item-link {
+  display: block;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+.menu-item-danger:hover { background: rgba(201, 122, 107, 0.12); }
 
 .ghost-btn, .text-btn {
   font-family: inherit;
@@ -563,6 +727,41 @@ body {
   max-width: 90%;
 }
 
+.crisis-card {
+  align-self: center;
+  max-width: 92%;
+  width: 100%;
+  background: var(--teal-dim);
+  border: 1px solid var(--teal);
+  border-radius: 14px;
+  padding: 14px 16px;
+  animation: rise 0.35s ease both;
+}
+.crisis-card-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+.crisis-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.crisis-card-body a {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s;
+}
+.crisis-card-body a:hover { border-color: var(--teal); }
+.crisis-card-body a strong { color: var(--amber); }
+
 .proactive-tag {
   display: inline-flex;
   align-items: center;
@@ -611,50 +810,207 @@ body {
 }
 
 .composer {
-  display: flex;
-  gap: 10px;
-  padding: 14px 20px;
+  /* Same reasoning as .topbar's safe-area padding, but for the home-indicator
+     gesture zone at the bottom — keeps the send button clear of it. */
+  padding: 14px 20px max(18px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
-.composer textarea {
-  flex: 1;
-  resize: none;
+.composer-field {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 0.95rem;
-  padding: 10px 12px;
-  max-height: 120px;
+  border-radius: 20px;
+  padding: 6px 6px 6px 8px;
+  transition: border-color 0.15s;
 }
-.composer textarea:focus {
-  outline: none;
+.composer-field:focus-within {
   border-color: var(--teal);
 }
-.composer button {
-  background: var(--amber);
-  color: #10161A;
+.composer-field textarea {
+  flex: 1;
+  resize: none;
+  background: transparent;
   border: none;
+  color: var(--text);
+  font-family: inherit;
+  /* Must stay >= 16px/1rem — iOS Safari auto-zooms into focused inputs
+     below that size and can leave the page stuck zoomed in afterwards. */
+  font-size: 1rem;
+  padding: 10px 6px;
+  min-height: 26px;
+  max-height: 160px;
+}
+.composer-field textarea:focus {
+  outline: none;
+}
+
+button.attach-btn {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: var(--text-muted);
+  font-size: 1.15rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+button.attach-btn:hover { background: var(--surface-2); color: var(--amber); }
+button.attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.send-btn {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--amber);
+  border: none;
+  border-radius: 50%;
+  color: #10161A;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+button.send-btn svg {
+  width: 17px;
+  height: 17px;
+  transform: translateX(-1px);
+}
+button.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+button.attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.image-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px 0;
+  flex-shrink: 0;
+}
+.image-preview-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
   border-radius: 10px;
-  padding: 0 20px;
-  font-weight: 600;
-  font-size: 0.9rem;
+  border: 1px solid var(--border);
+}
+.image-preview-remove {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.75rem;
   cursor: pointer;
 }
-.composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+.image-preview-remove:hover { color: var(--text); border-color: var(--amber); }
 
-.disclaimer {
-  flex-shrink: 0;
-  padding: 10px 20px 16px;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  line-height: 1.5;
-  text-align: center;
+.msg-image {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 10px;
+  object-fit: cover;
 }
-.disclaimer strong { color: var(--text); }
+.msg-image + div { margin-top: 8px; }
 
 @media (max-width: 480px) {
   .msg { max-width: 88%; }
 }
+
+/* ---------- legal pages ---------- */
+
+.legal-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+.legal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+.legal-header .brand { text-decoration: none; color: var(--text); }
+
+.legal-draft-tag {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--amber);
+  border: 1px solid var(--amber-dim);
+  background: var(--amber-dim);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.legal-callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 36px;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.legal-callout strong { color: var(--text); }
+.legal-callout a { color: var(--amber); }
+
+.legal-content h1 {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 1.6rem;
+  margin: 0 0 4px;
+}
+.legal-updated {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0 0 24px;
+}
+.legal-content h2 {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 1.05rem;
+  margin: 28px 0 10px;
+  color: var(--amber);
+}
+.legal-content p, .legal-content li {
+  font-size: 0.92rem;
+  line-height: 1.65;
+  color: var(--text);
+}
+.legal-content ul { padding-left: 20px; margin: 0 0 14px; }
+.legal-content li { margin-bottom: 6px; }
+.legal-content a { color: var(--teal); }
+.legal-content em { color: var(--text-muted); font-style: italic; }
+
+.legal-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 48px 0;
+}
+
+.legal-footer {
+  margin-top: 48px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.legal-footer a {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+.legal-footer a:hover { color: var(--text); }

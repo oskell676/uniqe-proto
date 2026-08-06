@@ -3,14 +3,16 @@
 Serves the chat UI from ./public and proxies conversation turns to the
 Claude API. Each user has their own account (email + password, confirmed via
 an emailed code before the account is created) and their own conversation
-history under ./data/conversations/<user_id>.json, so "memory" survives a
-page reload and is private per person.
+history, stored in Postgres, so "memory" survives a page reload/restart and
+is private per person.
 
-The one non-stdlib dependency is pywebpush (Web Push notifications), which
-needs real elliptic-curve crypto that Python's stdlib doesn't provide —
-hand-rolling that would be irresponsible. See requirements.txt.
+Non-stdlib dependencies: pywebpush (Web Push notifications, needs real
+elliptic-curve crypto stdlib doesn't provide), httpx (HTTP/2 client, required
+by Apple's APNs provider API for native iOS push), and psycopg/psycopg_pool
+(Postgres). See requirements.txt.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -21,6 +23,7 @@ import secrets
 import smtplib
 import threading
 import time
+import traceback
 import uuid
 import http.client
 from datetime import datetime, timedelta, timezone
@@ -31,6 +34,10 @@ from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
 from zoneinfo import ZoneInfo
 
+import psycopg
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
+
 try:
     from pywebpush import webpush, WebPushException
     from py_vapid import Vapid02
@@ -38,6 +45,11 @@ except ImportError:
     webpush = None
     WebPushException = Exception
     Vapid02 = None
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 ROOT = Path(__file__).resolve().parent
 
@@ -49,7 +61,7 @@ def load_dotenv():
     Called immediately below, before any other module-level os.environ.get()
     reads — a config value that only exists in .env (not a real exported
     shell/Fly env var) must already be in os.environ by the time constants
-    like DATA_DIR, VAPID_PRIVATE_KEY, or ADMIN_EMAILS are computed, since
+    like DATABASE_URL, VAPID_PRIVATE_KEY, or ADMIN_EMAILS are computed, since
     those run once at import time, not lazily per-request."""
     env_path = ROOT / ".env"
     if not env_path.exists():
@@ -68,14 +80,7 @@ def load_dotenv():
 load_dotenv()
 
 PUBLIC_DIR = ROOT / "public"
-DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data")))
-CONVERSATIONS_DIR = DATA_DIR / "conversations"
-DAYNOTES_DIR = DATA_DIR / "daynotes"
-SUMMARIES_DIR = DATA_DIR / "summaries"
-USAGE_LOG_FILE = DATA_DIR / "usage_log.json"
-USERS_FILE = DATA_DIR / "users.json"
-SESSIONS_FILE = DATA_DIR / "sessions.json"
-CHECKIN_SCHEDULE_FILE = DATA_DIR / "checkin_schedule.json"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 HOST = os.environ.get("HOST", "127.0.0.1")  # set to 0.0.0.0 behind a reverse proxy / in production
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"  # set to 1 once served over HTTPS
@@ -125,6 +130,16 @@ ADMIN_EMAILS = {
     e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()
 }
 
+# Pre-launch gate: new accounts require this code (shared out-of-band with
+# invited users), so signup traffic stays limited before the public launch.
+# Login is unaffected — existing accounts never need it.
+INVITE_CODE = os.environ.get("INVITE_CODE", "UNIQE2026")
+
+# Self-attested minimum age required at signup. This is an interim measure,
+# not real age verification — the number is provisional pending legal advice
+# on the actual minimum age this service should require.
+MIN_SIGNUP_AGE = 16
+
 # pywebpush's Vapid.from_string() only accepts a bare base64 key or a file
 # path — fed a full PEM block, it strips '\n' and tries to base64-decode the
 # "-----BEGIN/END PRIVATE KEY-----" header text too, producing garbage bytes.
@@ -137,6 +152,28 @@ if webpush is not None and VAPID_PRIVATE_KEY:
         VAPID_KEY = Vapid02.from_pem(VAPID_PRIVATE_KEY.encode())
     except Exception as exc:
         print(f"⚠️  Kunne ikke laste VAPID-nøkkel: {exc}", flush=True)
+
+# Native push (APNs) for the iOS App Store wrapper — the WKWebView that app
+# runs in doesn't support the Web Push API at all, unlike Safari/PWA, so it
+# needs its own delivery path via Apple's HTTP/2 provider API. Requires an
+# Apple Developer Program membership: an APNs Auth Key (.p8) generated in the
+# developer portal, its Key ID, and the account's Team ID.
+APNS_KEY_ID = os.environ.get("APNS_KEY_ID")
+APNS_TEAM_ID = os.environ.get("APNS_TEAM_ID")
+APNS_BUNDLE_ID = os.environ.get("APNS_BUNDLE_ID", "no.uniqe.app")
+APNS_AUTH_KEY = os.environ.get("APNS_AUTH_KEY")  # .p8 file contents (PEM, EC private key)
+APNS_USE_SANDBOX = os.environ.get("APNS_USE_SANDBOX", "0") == "1"
+APNS_HOST = "api.sandbox.push.apple.com" if APNS_USE_SANDBOX else "api.push.apple.com"
+
+_apns_ec_key = None
+if APNS_AUTH_KEY:
+    try:
+        from cryptography.hazmat.primitives import serialization
+        _apns_ec_key = serialization.load_pem_private_key(APNS_AUTH_KEY.encode(), password=None)
+    except Exception as exc:
+        print(f"⚠️  Kunne ikke laste APNs-nøkkel: {exc}", flush=True)
+
+APNS_CONFIGURED = bool(APNS_KEY_ID and APNS_TEAM_ID and _apns_ec_key)
 
 SYSTEM_PROMPT = """\
 Du er UNIQE — en varm, ikke-dømmende samtalepartner som alltid er tilgjengelig. Dette er en tidlig prototype som tester konseptet.
@@ -154,6 +191,8 @@ Hvis brukeren uttrykker håpløshet, selvmordstanker, eller at de er i akutt far
 - Kirkens SOS: 22 40 00 40
 - Ved akutt fare for liv og helse: 113, eller nærmeste legevakt: 116 117
 Du er en bro til hjelp, aldri en erstatning for den. Ikke gi deg ut for å være psykolog, lege eller annen fagperson.
+
+Hvis — og kun hvis — meldingen tyder på reell akutt fare (selvmordstanker, selvskading, umiddelbar fare for liv og helse), skal svaret ditt starte med markøren [KRISE] alene på første linje, før resten av svaret ditt som normalt. Dette trigger en synlig ressurs-boks i appen i tillegg til det du selv skriver. Bruk markøren varsomt og aldri ved alminnelig tristhet, stress eller vanskelige følelser — kun ved genuin akutt bekymring.
 
 Dette er en prototype under utvikling. Vær ærlig om det hvis brukeren spør direkte, men ikke la det ødelegge varmen i samtalen.
 """
@@ -201,6 +240,40 @@ RESET_TOKENS = {}  # token -> {user_id, expires_at}
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# ---------- rate limiting ----------
+# Simple in-memory sliding-window limiter, keyed per (bucket, IP-or-user).
+# Fine for a single machine (fly.toml pins min_machines_running=1) — if the
+# app ever scales to multiple machines this needs a shared store instead.
+
+RATE_LIMIT_SIGNUP = (5, 3600)            # 5 signups per hour per IP
+RATE_LIMIT_LOGIN = (10, 300)             # 10 login attempts per 5 min per IP
+RATE_LIMIT_VERIFY_EMAIL = (10, 900)      # 10 code attempts per 15 min per IP
+RATE_LIMIT_RESEND_CODE = (3, 600)        # 3 resends per 10 min per IP
+RATE_LIMIT_FORGOT_PASSWORD = (5, 3600)   # 5 reset requests per hour per IP
+RATE_LIMIT_RESET_PASSWORD = (10, 3600)   # 10 reset completions per hour per IP
+RATE_LIMIT_CHAT = (40, 600)              # 40 chat messages per 10 min per user
+RATE_LIMIT_CHECKIN = (10, 600)           # 10 manual check-ins per 10 min per user
+RATE_LIMIT_ADMIN_CHECKIN = (20, 600)     # 20 admin-triggered check-ins per 10 min per admin
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = {}  # (bucket_name, key) -> list of request timestamps
+
+
+def _rate_limit_check(bucket_name, key, max_requests, window_seconds):
+    """Sliding-window rate limit. Returns True if this request is allowed,
+    False if the caller has exceeded max_requests within window_seconds."""
+    now = time.time()
+    cutoff = now - window_seconds
+    cache_key = (bucket_name, key)
+    with _rate_limit_lock:
+        timestamps = [t for t in _rate_limit_buckets.get(cache_key, []) if t >= cutoff]
+        if len(timestamps) >= max_requests:
+            _rate_limit_buckets[cache_key] = timestamps
+            return False
+        timestamps.append(now)
+        _rate_limit_buckets[cache_key] = timestamps
+        return True
+
 
 # ---------- auth helpers ----------
 
@@ -240,43 +313,213 @@ def verify_password(password, salt_hex, expected_hash_hex):
     return hmac.compare_digest(computed, expected_hash_hex)
 
 
+# ---------- Postgres ----------
+# Every load_X/save_X function below keeps the exact input/output shape its
+# JSON-file predecessor had (list of dicts for users, plain dict for
+# sessions/schedule/usage, etc.) so none of the calling code elsewhere in
+# this file needed to change. Writes use UPSERT + "delete what's no longer
+# in the incoming collection" rather than blind delete-then-reinsert —
+# critical for `users` specifically, since a naive delete would fire
+# ON DELETE CASCADE on every table below and silently wipe that person's
+# entire conversation history on every login.
+
+_pool = None
+_pool_lock = threading.Lock()
+
+
+def get_pool():
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                if not DATABASE_URL:
+                    raise RuntimeError(
+                        "DATABASE_URL er ikke satt. Kjør `fly postgres attach` "
+                        "eller sett den i .env for lokal utvikling."
+                    )
+                _pool = ConnectionPool(
+                    DATABASE_URL, min_size=1, max_size=10,
+                    kwargs={"autocommit": True}, open=True,
+                )
+    return _pool
+
+
+SCHEMA_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        identifier TEXT UNIQUE NOT NULL,
+        salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at DOUBLE PRECISION NOT NULL,
+        install_prompt_shown BOOLEAN NOT NULL DEFAULT FALSE,
+        timezone TEXT,
+        push_subscriptions JSONB NOT NULL DEFAULT '[]',
+        referral_code TEXT,
+        referred_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        apns_tokens JSONB NOT NULL DEFAULT '[]'
+    )""",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS apns_tokens JSONB NOT NULL DEFAULT '[]'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)",
+    """CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at DOUBLE PRECISION NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
+    """CREATE TABLE IF NOT EXISTS images (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mime_type TEXT NOT NULL,
+        data BYTEA NOT NULL,
+        created_at DOUBLE PRECISION NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id)",
+    """CREATE TABLE IF NOT EXISTS messages (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        ts DOUBLE PRECISION NOT NULL,
+        proactive BOOLEAN NOT NULL DEFAULT FALSE,
+        image_id TEXT REFERENCES images(id) ON DELETE SET NULL,
+        crisis_flag BOOLEAN NOT NULL DEFAULT FALSE
+    )""",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_id TEXT REFERENCES images(id) ON DELETE SET NULL",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS crisis_flag BOOLEAN NOT NULL DEFAULT FALSE",
+    "CREATE INDEX IF NOT EXISTS idx_messages_user_ts ON messages(user_id, ts)",
+    """CREATE TABLE IF NOT EXISTS day_notes (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        data JSONB NOT NULL,
+        PRIMARY KEY (user_id, date)
+    )""",
+    """CREATE TABLE IF NOT EXISTS conversation_summaries (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        data JSONB NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS checkin_schedule (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        data JSONB NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS usage_log (
+        date TEXT PRIMARY KEY,
+        data JSONB NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS error_log (
+        id BIGSERIAL PRIMARY KEY,
+        ts DOUBLE PRECISION NOT NULL,
+        category TEXT NOT NULL,
+        message TEXT NOT NULL,
+        path TEXT,
+        user_id TEXT,
+        traceback TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts)",
+]
+
+
+def init_db():
+    with get_pool().connection() as conn:
+        for stmt in SCHEMA_STATEMENTS:
+            conn.execute(stmt)
+
+
 def load_users():
-    if not USERS_FILE.exists():
-        return []
-    try:
-        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT id, identifier, salt, password_hash, created_at, "
+            "install_prompt_shown, timezone, push_subscriptions, referral_code, referred_by, "
+            "apns_tokens FROM users"
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "identifier": r[1], "salt": r[2], "password_hash": r[3],
+            "created_at": r[4], "install_prompt_shown": r[5], "timezone": r[6],
+            "push_subscriptions": r[7] or [], "referral_code": r[8], "referred_by": r[9],
+            "apns_tokens": r[10] or [],
+        }
+        for r in rows
+    ]
 
 
 def save_users(users):
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            for u in users:
+                conn.execute(
+                    """
+                    INSERT INTO users (id, identifier, salt, password_hash, created_at,
+                        install_prompt_shown, timezone, push_subscriptions, referral_code, referred_by,
+                        apns_tokens)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        identifier = EXCLUDED.identifier,
+                        salt = EXCLUDED.salt,
+                        password_hash = EXCLUDED.password_hash,
+                        install_prompt_shown = EXCLUDED.install_prompt_shown,
+                        timezone = EXCLUDED.timezone,
+                        push_subscriptions = EXCLUDED.push_subscriptions,
+                        referral_code = EXCLUDED.referral_code,
+                        referred_by = EXCLUDED.referred_by,
+                        apns_tokens = EXCLUDED.apns_tokens
+                    """,
+                    (
+                        u["id"], u["identifier"], u["salt"], u["password_hash"], u["created_at"],
+                        u.get("install_prompt_shown", False), u.get("timezone"),
+                        Jsonb(u.get("push_subscriptions", [])),
+                        u.get("referral_code"), u.get("referred_by"),
+                        Jsonb(u.get("apns_tokens", [])),
+                    ),
+                )
+            ids = [u["id"] for u in users]
+            if ids:
+                conn.execute("DELETE FROM users WHERE id != ALL(%s)", (ids,))
+            else:
+                conn.execute("DELETE FROM users")
+
+
+def delete_user(user_id):
+    """Permanently deletes one user. ON DELETE CASCADE on sessions, messages,
+    day_notes, conversation_summaries and checkin_schedule takes care of the
+    rest — this is the only call needed for a full account deletion."""
+    with get_pool().connection() as conn:
+        conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
 
 def load_sessions():
-    """Load session tokens from disk (on the persistent volume), pruning any
-    that have expired. Sessions must survive process restarts — the Fly
-    machine can restart at any time (deploys, trial-tier auto-stop), and a
-    purely in-memory session store would silently log everyone out each time,
-    even on the same device with a still-valid 30-day cookie."""
-    if not SESSIONS_FILE.exists():
-        return {}
-    try:
-        sessions = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    """Load valid session tokens, pruning any that have expired. Sessions
+    must survive process restarts — the Fly machine can restart at any time
+    (deploys, scaling events), and a purely in-memory session store would
+    silently log everyone out each time, even on the same device with a
+    still-valid 30-day cookie."""
     now = time.time()
-    return {
-        token: entry
-        for token, entry in sessions.items()
-        if entry.get("expires_at", 0) > now
-    }
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            conn.execute("DELETE FROM sessions WHERE expires_at <= %s", (now,))
+            rows = conn.execute("SELECT token, user_id, expires_at FROM sessions").fetchall()
+    return {token: {"user_id": user_id, "expires_at": expires_at} for token, user_id, expires_at in rows}
 
 
 def save_sessions(sessions):
-    SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            for token, entry in sessions.items():
+                conn.execute(
+                    """
+                    INSERT INTO sessions (token, user_id, expires_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (token) DO UPDATE SET
+                        user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at
+                    """,
+                    (token, entry["user_id"], entry["expires_at"]),
+                )
+            tokens = list(sessions.keys())
+            if tokens:
+                conn.execute("DELETE FROM sessions WHERE token != ALL(%s)", (tokens,))
+            else:
+                conn.execute("DELETE FROM sessions")
 
 
 def find_user(users, identifier):
@@ -285,6 +528,27 @@ def find_user(users, identifier):
 
 def find_user_by_id(users, user_id):
     return next((u for u in users if u["id"] == user_id), None)
+
+
+def find_user_by_referral_code(users, code):
+    if not code:
+        return None
+    return next((u for u in users if u.get("referral_code") == code), None)
+
+
+def get_or_create_referral_code(user_id):
+    """Every user gets a personal referral code, generated lazily the first
+    time it's needed rather than backfilled for everyone up front."""
+    with _users_lock:
+        users = load_users()
+        user = find_user_by_id(users, user_id)
+        if not user:
+            return None
+        if user.get("referral_code"):
+            return user["referral_code"]
+        user["referral_code"] = secrets.token_hex(4)
+        save_users(users)
+        return user["referral_code"]
 
 
 def public_user(user):
@@ -438,6 +702,96 @@ def send_push_notification(user_id, title, body):
                 save_users(users)
 
 
+_apns_jwt_cache = {"token": None, "generated_at": 0.0}
+_apns_jwt_lock = threading.Lock()
+
+
+def _build_apns_jwt():
+    """Builds (and caches for ~50 minutes) the ES256 provider auth token
+    Apple's APNs HTTP/2 API requires on every request. Apple asks providers
+    not to regenerate this more than once every 20 minutes; tokens are valid
+    for up to an hour."""
+    with _apns_jwt_lock:
+        if _apns_jwt_cache["token"] and time.time() - _apns_jwt_cache["generated_at"] < 50 * 60:
+            return _apns_jwt_cache["token"]
+
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+        header = {"alg": "ES256", "kid": APNS_KEY_ID}
+        claims = {"iss": APNS_TEAM_ID, "iat": int(time.time())}
+        signing_input = (
+            base64.urlsafe_b64encode(json.dumps(header, separators=(",", ":")).encode()).rstrip(b"=")
+            + b"."
+            + base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=")
+        )
+        # APNs/JWS ES256 wants the raw 64-byte r||s signature, not the DER
+        # encoding cryptography's sign() returns by default.
+        der_signature = _apns_ec_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der_signature)
+        raw_signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        token = (signing_input + b"." + base64.urlsafe_b64encode(raw_signature).rstrip(b"=")).decode()
+
+        _apns_jwt_cache["token"] = token
+        _apns_jwt_cache["generated_at"] = time.time()
+        return token
+
+
+def send_apns_push(user_id, title, body):
+    """Send a native push notification to every iOS device the user has
+    registered via the Capacitor App Store app — that WKWebView shell has no
+    Web Push support at all, unlike Safari/the homescreen PWA install, which
+    already gets push via send_push_notification. Same best-effort contract:
+    never raises, and silently no-ops until Apple credentials are configured
+    (APNS_KEY_ID/APNS_TEAM_ID/APNS_AUTH_KEY)."""
+    if httpx is None or not APNS_CONFIGURED:
+        return
+
+    with _users_lock:
+        users = load_users()
+        user = find_user_by_id(users, user_id)
+        tokens = list(user.get("apns_tokens", [])) if user else []
+
+    if not tokens:
+        return
+
+    dead_tokens = []
+    jwt = _build_apns_jwt()
+    payload = {"aps": {"alert": {"title": title, "body": body}, "sound": "default"}}
+    try:
+        with httpx.Client(http2=True, timeout=10) as client:
+            for token in tokens:
+                try:
+                    resp = client.post(
+                        f"https://{APNS_HOST}/3/device/{token}",
+                        json=payload,
+                        headers={
+                            "authorization": f"bearer {jwt}",
+                            "apns-topic": APNS_BUNDLE_ID,
+                            "apns-push-type": "alert",
+                        },
+                    )
+                    if resp.status_code == 410 or (
+                        resp.status_code == 400 and resp.json().get("reason") == "BadDeviceToken"
+                    ):
+                        dead_tokens.append(token)
+                    elif resp.status_code != 200:
+                        print(f"⚠️  APNs-push feilet ({resp.status_code}): {resp.text}", flush=True)
+                except Exception as exc:
+                    print(f"⚠️  APNs-push feilet: {exc}", flush=True)
+    except Exception as exc:
+        print(f"⚠️  APNs-klient feilet: {exc}", flush=True)
+
+    if dead_tokens:
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if user:
+                user["apns_tokens"] = [t for t in user.get("apns_tokens", []) if t not in dead_tokens]
+                save_users(users)
+
+
 def get_pending_signup(identifier):
     """Returns the pending signup dict for identifier, or None if missing/expired."""
     with _pending_lock:
@@ -450,24 +804,81 @@ def get_pending_signup(identifier):
 
 # ---------- conversation storage (per user) ----------
 
-def conversation_path(user_id):
-    return CONVERSATIONS_DIR / f"{user_id}.json"
-
-
 def load_conversation(user_id):
-    path = conversation_path(user_id)
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT role, content, ts, proactive, image_id, crisis_flag FROM messages "
+            "WHERE user_id = %s ORDER BY id",
+            (user_id,),
+        ).fetchall()
+    return [
+        {
+            "role": role, "content": content, "ts": ts, "proactive": bool(proactive),
+            "image_id": image_id, "crisis_flag": bool(crisis_flag),
+        }
+        for role, content, ts, proactive, image_id, crisis_flag in rows
+    ]
 
 
 def save_conversation(user_id, messages):
-    path = conversation_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Only inserts the newly-appended tail rather than rewriting the whole
+    history every time — this app only ever appends to a conversation (or
+    resets it to empty via /api/reset), so a shrink is always a reset."""
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            (existing_count,) = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,)
+            ).fetchone()
+            if len(messages) < existing_count:
+                conn.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+                existing_count = 0
+            new_rows = messages[existing_count:]
+            if new_rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO messages (user_id, role, content, ts, proactive, image_id, crisis_flag) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        [
+                            (user_id, m["role"], m["content"], m.get("ts", time.time()),
+                             bool(m.get("proactive", False)), m.get("image_id"),
+                             bool(m.get("crisis_flag", False)))
+                            for m in new_rows
+                        ],
+                    )
+
+
+# ---------- uploaded images ----------
+# Stored directly in Postgres (bytea) rather than object storage — simplest
+# option that needs no new third-party account, and negligible cost at this
+# scale (a few thousand images is still a rounding error against the $0.15/GB
+# Postgres storage price). Revisit if upload volume ever gets large.
+
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB raw — comfortably under Claude's 10MB base64 API limit
+
+
+def store_image(user_id, mime_type, data):
+    image_id = uuid.uuid4().hex
+    with get_pool().connection() as conn:
+        conn.execute(
+            "INSERT INTO images (id, user_id, mime_type, data, created_at) VALUES (%s, %s, %s, %s, %s)",
+            (image_id, user_id, mime_type, data, time.time()),
+        )
+    return image_id
+
+
+def load_image(image_id, user_id=None):
+    """Returns (mime_type, data) or None. Pass user_id to also enforce that
+    the image belongs to that user — used when serving images over HTTP so
+    one user can't fetch another's photo by guessing an image id."""
+    query = "SELECT mime_type, data FROM images WHERE id = %s"
+    params = [image_id]
+    if user_id is not None:
+        query += " AND user_id = %s"
+        params.append(user_id)
+    with get_pool().connection() as conn:
+        row = conn.execute(query, params).fetchone()
+    return row
 
 
 # ---------- calendar day-notes (per user) ----------
@@ -476,24 +887,34 @@ def save_conversation(user_id, messages):
 # generated during normal chatting, so browsing the calendar is the only
 # extra Claude usage this feature adds.
 
-def daynotes_path(user_id):
-    return DAYNOTES_DIR / f"{user_id}.json"
-
-
 def load_day_notes(user_id):
-    path = daynotes_path(user_id)
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT date, data FROM day_notes WHERE user_id = %s", (user_id,)
+        ).fetchall()
+    return {date: data for date, data in rows}
 
 
 def save_day_notes(user_id, notes):
-    path = daynotes_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            for date, data in notes.items():
+                conn.execute(
+                    """
+                    INSERT INTO day_notes (user_id, date, data)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id, date) DO UPDATE SET data = EXCLUDED.data
+                    """,
+                    (user_id, date, Jsonb(data)),
+                )
+            dates = list(notes.keys())
+            if dates:
+                conn.execute(
+                    "DELETE FROM day_notes WHERE user_id = %s AND date != ALL(%s)",
+                    (user_id, dates),
+                )
+            else:
+                conn.execute("DELETE FROM day_notes WHERE user_id = %s", (user_id,))
 
 
 def group_messages_by_date(messages):
@@ -516,17 +937,62 @@ def group_messages_by_date(messages):
 # detail isn't needed for a monthly estimate.
 
 def load_usage_log():
-    if not USAGE_LOG_FILE.exists():
-        return {}
-    try:
-        return json.loads(USAGE_LOG_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    with get_pool().connection() as conn:
+        rows = conn.execute("SELECT date, data FROM usage_log").fetchall()
+    return {date: data for date, data in rows}
 
 
 def save_usage_log(log):
-    USAGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USAGE_LOG_FILE.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            for date, data in log.items():
+                conn.execute(
+                    """
+                    INSERT INTO usage_log (date, data)
+                    VALUES (%s, %s)
+                    ON CONFLICT (date) DO UPDATE SET data = EXCLUDED.data
+                    """,
+                    (date, Jsonb(data)),
+                )
+
+
+def log_error(category, message, path=None, user_id=None, traceback_str=None):
+    """Best-effort structured error logging for the admin dashboard. Never
+    raises — a broken error logger must never crash the request it's trying
+    to report on, so failures here are swallowed and just printed instead."""
+    try:
+        with get_pool().connection() as conn:
+            conn.execute(
+                "INSERT INTO error_log (ts, category, message, path, user_id, traceback) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (time.time(), category, str(message)[:2000], path, user_id, traceback_str),
+            )
+    except Exception as exc:
+        print(f"⚠️  Klarte ikke å logge feil til databasen ({category}): {exc}", flush=True)
+
+
+def load_recent_errors(limit=50):
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT ts, category, message, path, user_id, traceback "
+            "FROM error_log ORDER BY id DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "ts": ts, "category": category, "message": message,
+            "path": path, "user_id": user_id, "traceback": traceback_str,
+        }
+        for ts, category, message, path, user_id, traceback_str in rows
+    ]
+
+
+def count_errors_since(cutoff_ts):
+    with get_pool().connection() as conn:
+        (count,) = conn.execute(
+            "SELECT count(*) FROM error_log WHERE ts >= %s", (cutoff_ts,)
+        ).fetchone()
+    return count
 
 
 def record_usage(usage):
@@ -600,14 +1066,21 @@ def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PR
     if len(api_messages) > 1:
         cached_messages = list(api_messages)
         boundary = cached_messages[-2]
-        cached_messages[-2] = {
-            "role": boundary["role"],
-            "content": [{
-                "type": "text",
-                "text": boundary["content"],
-                "cache_control": {"type": "ephemeral"},
-            }],
-        }
+        if isinstance(boundary["content"], str):
+            cached_messages[-2] = {
+                "role": boundary["role"],
+                "content": [{
+                    "type": "text",
+                    "text": boundary["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            }
+        else:
+            # Already a content-block list (e.g. an image message) — mark
+            # the last block as the cache boundary instead of re-wrapping it.
+            blocks = list(boundary["content"])
+            blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+            cached_messages[-2] = {"role": boundary["role"], "content": blocks}
 
     body = json.dumps({
         "model": MODEL,
@@ -677,10 +1150,51 @@ def call_claude(api_messages, effort="medium", max_tokens=1024, system=SYSTEM_PR
     return "(Fikk ikke noe svar fra modellen akkurat nå — prøv igjen.)"
 
 
+CRISIS_MARKER = "[KRISE]"
+
+
+def extract_crisis_flag(reply):
+    """Strip the model's structured crisis marker (see SYSTEM_PROMPT's
+    'Kritisk sikkerhetsprinsipp') from the reply text if present, returning
+    (cleaned_reply, was_flagged). The flag drives a dedicated resource card
+    in the UI, on top of whatever UNIQE itself says in character."""
+    stripped = reply.lstrip()
+    if stripped.startswith(CRISIS_MARKER):
+        cleaned = stripped[len(CRISIS_MARKER):].lstrip("\n ")
+        return (cleaned or reply), True
+    return reply, False
+
+
+def _message_api_content(m):
+    """Most messages are plain text. When an image is attached, build a
+    content-block list instead — image block first, then text, matching
+    Anthropic's own guidance that images work best placed before the text."""
+    image_id = m.get("image_id")
+    if not image_id:
+        return m["content"]
+
+    image = load_image(image_id)
+    if image is None:
+        return m["content"] or "(bildet er ikke lenger tilgjengelig)"
+
+    mime_type, data = image
+    blocks = [{
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": mime_type,
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+        },
+    }]
+    if m["content"]:
+        blocks.append({"type": "text", "text": m["content"]})
+    return blocks
+
+
 def to_api_messages(stored):
     """Convert stored history into the {role, content} shape the API expects."""
     trimmed = stored[-MAX_HISTORY_TURNS_SENT:]
-    return [{"role": m["role"], "content": m["content"]} for m in trimmed]
+    return [{"role": m["role"], "content": _message_api_content(m)} for m in trimmed]
 
 
 # ---------- rolling conversation summary (per user) ----------
@@ -718,24 +1232,24 @@ SUMMARY_INSTRUCTION_UPDATE = (
 )
 
 
-def summary_path(user_id):
-    return SUMMARIES_DIR / f"{user_id}.json"
-
-
 def load_conversation_summary(user_id):
-    path = summary_path(user_id)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT data FROM conversation_summaries WHERE user_id = %s", (user_id,)
+        ).fetchone()
+    return row[0] if row else None
 
 
 def save_conversation_summary(user_id, entry):
-    path = summary_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_summaries (user_id, data)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data
+            """,
+            (user_id, Jsonb(entry)),
+        )
 
 
 def generate_conversation_summary(delta_messages, previous_summary):
@@ -750,6 +1264,7 @@ def generate_conversation_summary(delta_messages, previous_summary):
         reply = call_claude(api_messages, effort="low", max_tokens=250, system=SUMMARY_SYSTEM_PROMPT)
     except RuntimeError as exc:
         print(f"⚠️  Kunne ikke oppdatere samtalesammendrag: {exc}", flush=True)
+        log_error("claude_api", str(exc), path="generate_conversation_summary")
         return None
     return reply.strip()
 
@@ -830,6 +1345,7 @@ def generate_day_note(day_messages):
         )
     except RuntimeError as exc:
         print(f"⚠️  Kunne ikke generere kalendernotat: {exc}", flush=True)
+        log_error("claude_api", str(exc), path="generate_day_note")
         return None
 
     note, positive = None, None
@@ -847,8 +1363,8 @@ def generate_day_note(day_messages):
 def perform_checkin(user_id):
     """Generate and store a proactive check-in reply for user_id, and push a
     notification for it. Shared by the manual "Simuler innsjekk" button and
-    the automated scheduler. Returns the reply text, or None on failure —
-    callers must treat this as best-effort."""
+    the automated scheduler. Returns (reply_text, crisis_flag), or None on
+    failure — callers must treat this as best-effort."""
     with _get_conversation_lock(user_id):
         stored = load_conversation(user_id)
         system_prompt = build_chat_system_prompt(user_id, stored)
@@ -859,19 +1375,23 @@ def perform_checkin(user_id):
             reply = call_claude(api_messages, effort="low", max_tokens=400, system=system_prompt)
         except RuntimeError as exc:
             print(f"⚠️  Innsjekk feilet for {user_id}: {exc}", flush=True)
+            log_error("claude_api", str(exc), path="perform_checkin", user_id=user_id)
             return None
 
+        reply, crisis_flag = extract_crisis_flag(reply)
         stored.append({
             "role": "assistant",
             "content": reply,
             "ts": time.time(),
             "proactive": True,
+            "crisis_flag": crisis_flag,
         })
         save_conversation(user_id, stored)
 
     preview = reply if len(reply) <= 150 else reply[:147] + "..."
     send_push_notification(user_id, "UNIQE", preview)
-    return reply
+    send_apns_push(user_id, "UNIQE", preview)
+    return reply, crisis_flag
 
 
 # ---------- automated check-in scheduler ----------
@@ -899,17 +1419,28 @@ def generate_daily_schedule(local_date, tz):
 
 
 def load_checkin_schedule():
-    if not CHECKIN_SCHEDULE_FILE.exists():
-        return {}
-    try:
-        return json.loads(CHECKIN_SCHEDULE_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    with get_pool().connection() as conn:
+        rows = conn.execute("SELECT user_id, data FROM checkin_schedule").fetchall()
+    return {user_id: data for user_id, data in rows}
 
 
 def save_checkin_schedule(schedule):
-    CHECKIN_SCHEDULE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CHECKIN_SCHEDULE_FILE.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            for user_id, data in schedule.items():
+                conn.execute(
+                    """
+                    INSERT INTO checkin_schedule (user_id, data)
+                    VALUES (%s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data
+                    """,
+                    (user_id, Jsonb(data)),
+                )
+            user_ids = list(schedule.keys())
+            if user_ids:
+                conn.execute("DELETE FROM checkin_schedule WHERE user_id != ALL(%s)", (user_ids,))
+            else:
+                conn.execute("DELETE FROM checkin_schedule")
 
 
 def run_checkin_scheduler_tick():
@@ -981,6 +1512,8 @@ def compute_admin_stats():
     messages_7d = 0
     active_24h = set()
     active_7d = set()
+    crisis_flags_24h = 0
+    crisis_flags_7d = 0
 
     for u in users:
         with _get_conversation_lock(u["id"]):
@@ -995,6 +1528,10 @@ def compute_admin_stats():
                     active_7d.add(u["id"])
                     if ts >= day_ago:
                         active_24h.add(u["id"])
+                if m.get("crisis_flag"):
+                    crisis_flags_7d += 1
+                    if ts >= day_ago:
+                        crisis_flags_24h += 1
 
     fixed_cost_kr = FIXED_COST_KR_PER_MONTH
     variable_cost_kr = compute_actual_ai_cost_kr(days=7)
@@ -1003,7 +1540,7 @@ def compute_admin_stats():
         "total_users": len(users),
         "new_signups_7d": sum(1 for u in users if u.get("created_at", 0) >= week_ago),
         "new_signups_30d": sum(1 for u in users if u.get("created_at", 0) >= month_ago),
-        "push_enabled": sum(1 for u in users if u.get("push_subscriptions")),
+        "push_enabled": sum(1 for u in users if u.get("push_subscriptions") or u.get("apns_tokens")),
         "active_users_24h": len(active_24h),
         "active_users_7d": len(active_7d),
         "total_messages": total_messages,
@@ -1011,6 +1548,10 @@ def compute_admin_stats():
         "fixed_cost_kr": round(fixed_cost_kr, 1),
         "variable_cost_kr": round(variable_cost_kr, 1),
         "estimated_monthly_cost_kr": round(fixed_cost_kr + variable_cost_kr, 1),
+        "errors_24h": count_errors_since(day_ago),
+        "errors_7d": count_errors_since(week_ago),
+        "crisis_flags_24h": crisis_flags_24h,
+        "crisis_flags_7d": crisis_flags_7d,
     }
 
 
@@ -1030,6 +1571,7 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_header:
             self.send_header("Set-Cookie", cookie_header)
         self.end_headers()
+        self._response_sent = True
         if not getattr(self, "_suppress_body", False):
             self.wfile.write(payload)
 
@@ -1047,6 +1589,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
+        self._response_sent = True
         if not getattr(self, "_suppress_body", False):
             self.wfile.write(data)
 
@@ -1059,6 +1602,31 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError:
             return {}
+
+    def _client_ip(self):
+        # Fly-Client-IP is set by Fly's own edge proxy to the real client IP
+        # (reliable here since nothing else fronts this app). Falling back to
+        # X-Forwarded-For / the raw socket address keeps local dev working.
+        fly_ip = self.headers.get("Fly-Client-IP")
+        if fly_ip:
+            return fly_ip.strip()
+        xff = self.headers.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _rate_limited(self, bucket_name, limit, key=None):
+        """Enforces a rate limit; `limit` is a (max_requests, window_seconds)
+        pair. Defaults to limiting by client IP — pass a user_id as `key` for
+        per-account limits. Sends 429 and returns True if blocked."""
+        max_requests, window_seconds = limit
+        rl_key = key if key is not None else self._client_ip()
+        if not _rate_limit_check(bucket_name, rl_key, max_requests, window_seconds):
+            self._send_json(
+                {"error": "For mange forsøk. Vent litt og prøv igjen om noen minutter."}, 429
+            )
+            return True
+        return False
 
     # ---------- auth helpers ----------
 
@@ -1113,7 +1681,41 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._suppress_body = False
 
+    def _handle_unhandled_exception(self):
+        """Last-resort safety net around request dispatch: logs the failure
+        (console + admin-visible error_log table) and returns a generic 500
+        instead of letting the connection just drop dead with no response."""
+        tb_str = traceback.format_exc()
+        path = urlparse(self.path).path
+        print(f"⚠️  Uhåndtert feil på {path}:\n{tb_str}", flush=True)
+        try:
+            user_id = self._current_user_id()
+        except Exception:
+            user_id = None
+        log_error("unhandled", tb_str.strip().splitlines()[-1], path=path, user_id=user_id, traceback_str=tb_str)
+        if not getattr(self, "_response_sent", False):
+            try:
+                self._send_json(
+                    {"error": "Noe gikk galt på serveren. Prøv igjen om et lite øyeblikk."}, 500
+                )
+            except Exception:
+                pass
+
     def do_GET(self):
+        self._response_sent = False
+        try:
+            self._route_get()
+        except Exception:
+            self._handle_unhandled_exception()
+
+    def do_POST(self):
+        self._response_sent = False
+        try:
+            self._route_post()
+        except Exception:
+            self._handle_unhandled_exception()
+
+    def _route_get(self):
         # The session cookie has no Domain attribute, so it's host-only
         # (RFC 6265) — a session created on the apex domain is never sent to
         # "www." and vice versa. Rather than fragment sessions across two
@@ -1140,6 +1742,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("manifest.json", "application/manifest+json; charset=utf-8")
         elif path == "/sw.js":
             self._send_file("sw.js", "application/javascript; charset=utf-8")
+        elif path == "/juridisk" or path == "/juridisk.html":
+            self._send_file("juridisk.html", "text/html; charset=utf-8")
+        elif path == "/.well-known/assetlinks.json":
+            self._send_file(".well-known/assetlinks.json", "application/json; charset=utf-8")
         elif path.startswith("/icons/") and path.endswith(".png"):
             self._send_file(path.lstrip("/"), "image/png")
         elif path == "/api/auth/me":
@@ -1159,6 +1765,34 @@ class Handler(BaseHTTPRequestHandler):
             with _get_conversation_lock(user_id):
                 messages = load_conversation(user_id)
             self._send_json({"messages": messages})
+        elif path == "/api/referral":
+            user_id = self._require_auth()
+            if not user_id:
+                return
+            code = get_or_create_referral_code(user_id)
+            with _users_lock:
+                users = load_users()
+                invited_count = sum(1 for u in users if u.get("referred_by") == user_id)
+            self._send_json({"code": code, "invited_count": invited_count})
+        elif path.startswith("/api/images/"):
+            user_id = self._require_auth()
+            if not user_id:
+                return
+            image_id = path[len("/api/images/"):]
+            image = load_image(image_id, user_id=user_id)
+            if image is None:
+                self._send_json({"error": "not found"}, 404)
+                return
+            mime_type, data = image
+            data = bytes(data)
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            self._response_sent = True
+            if not getattr(self, "_suppress_body", False):
+                self.wfile.write(data)
         elif path == "/api/calendar":
             self._handle_calendar()
         elif path == "/api/admin/stats":
@@ -1166,10 +1800,15 @@ class Handler(BaseHTTPRequestHandler):
             if not user_id:
                 return
             self._send_json(compute_admin_stats())
+        elif path == "/api/admin/errors":
+            user_id = self._require_admin()
+            if not user_id:
+                return
+            self._send_json({"errors": load_recent_errors(50)})
         else:
             self._send_json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def _route_post(self):
         path = urlparse(self.path).path
         if path == "/api/auth/signup":
             self._handle_signup()
@@ -1187,10 +1826,16 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_logout()
         elif path == "/api/auth/change-password":
             self._handle_change_password()
+        elif path == "/api/auth/delete-account":
+            self._handle_delete_account()
         elif path == "/api/push/subscribe":
             self._handle_push_subscribe()
         elif path == "/api/push/unsubscribe":
             self._handle_push_unsubscribe()
+        elif path == "/api/push/apns-register":
+            self._handle_apns_register()
+        elif path == "/api/push/apns-unregister":
+            self._handle_apns_unregister()
         elif path == "/api/chat":
             self._handle_chat()
         elif path == "/api/checkin":
@@ -1210,15 +1855,29 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- auth endpoints ----------
 
     def _handle_signup(self):
+        if self._rate_limited("signup", RATE_LIMIT_SIGNUP):
+            return
+
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         password = body.get("password") or ""
+        invite_code = (body.get("invite_code") or "").strip()
+        age_confirmed = bool(body.get("age_confirmed"))
+        ref_code = (body.get("ref") or "").strip()
 
         if not identifier:
             self._send_json({"error": "Skriv inn en gyldig e-postadresse."}, 400)
             return
         if len(password) < 6:
             self._send_json({"error": "Passordet må være minst 6 tegn."}, 400)
+            return
+        if not age_confirmed:
+            self._send_json(
+                {"error": f"Du må bekrefte at du er {MIN_SIGNUP_AGE} år eller eldre for å opprette en konto."}, 400
+            )
+            return
+        if not hmac.compare_digest(invite_code.lower(), INVITE_CODE.lower()):
+            self._send_json({"error": "Ugyldig invitasjonskode."}, 403)
             return
 
         with _users_lock:
@@ -1228,6 +1887,8 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": "Det finnes allerede en bruker med denne e-posten."}, 409
                 )
                 return
+            referrer = find_user_by_referral_code(users, ref_code)
+            referred_by = referrer["id"] if referrer else None
 
         # SMTP send happens outside _users_lock — it can take seconds, and
         # holding a global lock that long would serialize every unrelated
@@ -1242,6 +1903,7 @@ class Handler(BaseHTTPRequestHandler):
                 "code": code,
                 "expires_at": now + EMAIL_CODE_TTL,
                 "last_sent_at": now,
+                "referred_by": referred_by,
             }
         error = safe_send_email(send_verification_email, identifier, code)
         if error:
@@ -1252,6 +1914,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "verification_required": True, "identifier": identifier})
 
     def _handle_verify_email(self):
+        if self._rate_limited("verify_email", RATE_LIMIT_VERIFY_EMAIL):
+            return
+
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         code = (body.get("code") or "").strip()
@@ -1289,6 +1954,7 @@ class Handler(BaseHTTPRequestHandler):
                 "created_at": time.time(),
                 "install_prompt_shown": True,
                 "timezone": tz_name or DEFAULT_TIMEZONE,
+                "referred_by": pending.get("referred_by"),
             }
             users.append(user)
             save_users(users)
@@ -1308,6 +1974,9 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _handle_resend_code(self):
+        if self._rate_limited("resend_code", RATE_LIMIT_RESEND_CODE):
+            return
+
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         if not identifier:
@@ -1340,6 +2009,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True})
 
     def _handle_login(self):
+        if self._rate_limited("login", RATE_LIMIT_LOGIN):
+            return
+
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         password = body.get("password") or ""
@@ -1429,6 +2101,27 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json({"ok": True})
 
+    def _handle_delete_account(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        body = self._read_json_body()
+        password = body.get("password") or ""
+
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if not user:
+                self._send_json({"error": "Fant ikke brukeren."}, 404)
+                return
+            if not verify_password(password, user["salt"], user["password_hash"]):
+                self._send_json({"error": "Feil passord."}, 401)
+                return
+            delete_user(user_id)
+
+        self._send_json({"ok": True}, cookie_header=clear_session_cookie())
+
     def _handle_push_subscribe(self):
         user_id = self._require_auth()
         if not user_id:
@@ -1471,7 +2164,52 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json({"ok": True})
 
+    def _handle_apns_register(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        body = self._read_json_body()
+        token = (body.get("token") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{32,256}", token or ""):
+            self._send_json({"error": "Ugyldig enhets-token."}, 400)
+            return
+
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if not user:
+                self._send_json({"error": "Fant ikke brukeren."}, 404)
+                return
+            tokens = user.setdefault("apns_tokens", [])
+            if token not in tokens:
+                tokens.append(token)
+                save_users(users)
+
+        self._send_json({"ok": True})
+
+    def _handle_apns_unregister(self):
+        user_id = self._require_auth()
+        if not user_id:
+            return
+
+        body = self._read_json_body()
+        token = (body.get("token") or "").strip().lower()
+
+        with _users_lock:
+            users = load_users()
+            user = find_user_by_id(users, user_id)
+            if user:
+                tokens = user.setdefault("apns_tokens", [])
+                tokens[:] = [t for t in tokens if t != token]
+                save_users(users)
+
+        self._send_json({"ok": True})
+
     def _handle_forgot_password(self):
+        if self._rate_limited("forgot_password", RATE_LIMIT_FORGOT_PASSWORD):
+            return
+
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
         generic_message = (
@@ -1502,6 +2240,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "message": generic_message})
 
     def _handle_reset_password(self):
+        if self._rate_limited("reset_password", RATE_LIMIT_RESET_PASSWORD):
+            return
+
         body = self._read_json_body()
         token = (body.get("token") or "").strip()
         new_password = body.get("new_password") or ""
@@ -1604,6 +2345,8 @@ class Handler(BaseHTTPRequestHandler):
         admin_id = self._require_admin()
         if not admin_id:
             return
+        if self._rate_limited("admin_checkin", RATE_LIMIT_ADMIN_CHECKIN, key=admin_id):
+            return
 
         body = self._read_json_body()
         identifier = normalize_identifier(body.get("identifier"))
@@ -1618,8 +2361,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Fant ingen bruker med denne e-postadressen."}, 404)
             return
 
-        reply = perform_checkin(user["id"])
-        if reply is None:
+        result = perform_checkin(user["id"])
+        if result is None:
             self._send_json({"error": "Klarte ikke å generere en innsjekk akkurat nå."}, 500)
             return
 
@@ -1634,45 +2377,79 @@ class Handler(BaseHTTPRequestHandler):
         user_id = self._require_auth()
         if not user_id:
             return
+        if self._rate_limited("chat", RATE_LIMIT_CHAT, key=user_id):
+            return
 
         body = self._read_json_body()
         user_text = (body.get("message") or "").strip()
-        if not user_text:
+        image_payload = body.get("image")
+
+        image_id = None
+        if image_payload:
+            mime_type = (image_payload.get("mime_type") or "").lower()
+            if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+                self._send_json(
+                    {"error": "Bildeformatet støttes ikke. Bruk JPEG, PNG, GIF eller WebP."}, 400
+                )
+                return
+            try:
+                image_bytes = base64.b64decode(image_payload.get("data") or "", validate=True)
+            except Exception:
+                self._send_json({"error": "Klarte ikke å lese bildet."}, 400)
+                return
+            if not image_bytes:
+                self._send_json({"error": "Klarte ikke å lese bildet."}, 400)
+                return
+            if len(image_bytes) > MAX_IMAGE_BYTES:
+                self._send_json({"error": "Bildet er for stort (maks 5 MB)."}, 400)
+                return
+            image_id = store_image(user_id, mime_type, image_bytes)
+
+        if not user_text and not image_id:
             self._send_json({"error": "Tom melding"}, 400)
             return
 
         with _get_conversation_lock(user_id):
             stored = load_conversation(user_id)
-            stored.append({"role": "user", "content": user_text, "ts": time.time()})
+            new_message = {"role": "user", "content": user_text, "ts": time.time()}
+            if image_id:
+                new_message["image_id"] = image_id
+            stored.append(new_message)
             system_prompt = build_chat_system_prompt(user_id, stored)
 
             try:
                 reply = call_claude(to_api_messages(stored), system=system_prompt)
             except RuntimeError as exc:
+                log_error("claude_api", str(exc), path="/api/chat", user_id=user_id)
                 self._send_json({"error": str(exc)}, 500)
                 return
 
+            reply, crisis_flag = extract_crisis_flag(reply)
             stored.append({
                 "role": "assistant",
                 "content": reply,
                 "ts": time.time(),
                 "proactive": False,
+                "crisis_flag": crisis_flag,
             })
             save_conversation(user_id, stored)
 
-        self._send_json({"reply": reply})
+        self._send_json({"reply": reply, "image_id": image_id, "crisis_flag": crisis_flag})
 
     def _handle_checkin(self):
         user_id = self._require_auth()
         if not user_id:
             return
+        if self._rate_limited("checkin", RATE_LIMIT_CHECKIN, key=user_id):
+            return
 
-        reply = perform_checkin(user_id)
-        if reply is None:
+        result = perform_checkin(user_id)
+        if result is None:
             self._send_json({"error": "Klarte ikke å generere en innsjekk akkurat nå."}, 500)
             return
 
-        self._send_json({"reply": reply, "proactive": True})
+        reply, crisis_flag = result
+        self._send_json({"reply": reply, "proactive": True, "crisis_flag": crisis_flag})
 
 
 def main():
@@ -1682,6 +2459,7 @@ def main():
             "den til i en .env-fil (se .env.example) eller eksporterer den selv.",
             flush=True,
         )
+    init_db()
     threading.Thread(target=checkin_scheduler_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"UNIQE-prototype kjører på http://{HOST}:{PORT}", flush=True)
